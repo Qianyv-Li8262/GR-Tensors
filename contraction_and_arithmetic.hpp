@@ -120,11 +120,29 @@ struct extract_letters<type_list<Indices...>> {
 
 template <typename Letter, typename List>
 struct find_index_from_letter;
+
+template <bool Matches, typename Letter, typename Head, typename... Tail>
+struct find_index_from_letter_impl;
+
 template <typename Letter, typename Head, typename... Tail>
-struct find_index_from_letter<Letter, type_list<Head, Tail...>> {
-    using result = std::conditional_t<std::is_same_v<Letter, typename index_traits<Head>::letter>, Head,
-                                      typename find_index_from_letter<Letter, type_list<Tail...>>::result>;
+struct find_index_from_letter_impl<true, Letter, Head, Tail...> {
+    using result = Head;
 };
+
+template <typename Letter, typename Head, typename... Tail>
+struct find_index_from_letter_impl<false, Letter, Head, Tail...> {
+    using result = typename find_index_from_letter<Letter, type_list<Tail...>>::result;
+};
+
+template <typename Letter>
+struct find_index_from_letter<Letter, type_list<>> {
+    static_assert(!std::is_same_v<Letter, Letter>, "trace index letter must exist in the tensor");
+};
+
+template <typename Letter, typename Head, typename... Tail>
+struct find_index_from_letter<Letter, type_list<Head, Tail...>>
+    : find_index_from_letter_impl<std::is_same_v<Letter, typename index_traits<Head>::letter>, Letter, Head,
+                                  Tail...> {};
 
 
 template <typename datatype, typename... LIndices, typename... RIndices>

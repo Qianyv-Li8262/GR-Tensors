@@ -2,6 +2,8 @@
 #include "Index_and_variance.hpp"
 #include "type_lists.hpp"
 #include <array>
+#include <cassert>
+#include <type_traits>
 
 constexpr std::size_t factorial(std::size_t n) {
     std::size_t r = 1;
@@ -95,6 +97,9 @@ struct Tensor {
     template <typename... Ints>
     datatype& operator()(Ints... idxs) {
         static_assert(sizeof...(Ints) == rank, "number of indices must match tensor rank");
+        static_assert((std::is_integral_v<std::decay_t<Ints>> && ...),
+                      "tensor component indices must be integral");
+        assert(((static_cast<std::size_t>(idxs) < 4) && ...));
         return data[linear_index(idxs...)];
     }
 
@@ -102,6 +107,9 @@ struct Tensor {
     template <typename... Ints>
     const datatype& operator()(Ints... idxs) const {
         static_assert(sizeof...(Ints) == rank, "number of indices must match tensor rank");
+        static_assert((std::is_integral_v<std::decay_t<Ints>> && ...),
+                      "tensor component indices must be integral");
+        assert(((static_cast<std::size_t>(idxs) < 4) && ...));
         return data[linear_index(idxs...)];
     }
 };

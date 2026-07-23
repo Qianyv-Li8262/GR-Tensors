@@ -1,7 +1,11 @@
 #pragma once
 #include "contraction_and_arithmetic.hpp"
 #include "tensor_class.hpp"
+#include <algorithm>
+#include <cassert>
+#include <cmath>
 #include <cstdlib>
+#include <limits>
 #include <type_traits>
 #include <utility>
 
@@ -83,6 +87,9 @@ auto partial_impl(const F& field, const coord<CoordLetter>& x, double h, DiffSch
         apply_stencil(stencil);
         break;
     }
+    default:
+        assert(false && "invalid finite-difference scheme");
+        std::abort();
     }
 
     return result;
@@ -92,6 +99,13 @@ auto partial_impl(const F& field, const coord<CoordLetter>& x, double h, DiffSch
 
 template <typename DerivLetter, typename CoordLetter, typename F>
 auto partial(const F& field, const coord<CoordLetter>& x, double h = 1e-2, DiffScheme scheme = DiffScheme::Central8) {
+    assert(std::isfinite(h) && [&] {
+        double scale = 1.0;
+        for (double component : x.data) {
+            scale = std::max(scale, std::abs(component));
+        }
+        return std::abs(h) > 32.0 * std::numeric_limits<double>::epsilon() * scale;
+    }());
     auto sample = field(x);
     return partial_impl<DerivLetter>(field, x, h, scheme, sample);
 }

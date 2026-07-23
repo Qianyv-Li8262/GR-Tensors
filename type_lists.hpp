@@ -178,8 +178,8 @@ struct list2_fill_as_list1_impl<type_list<head_all, all...>, type_list<head_sele
     using result = typename next_step::result;
 };
 template <typename all,typename selected>
-struct list2_fill_as_list_1{};
+struct embed_permutation_into_original{};
 template <typename... all,typename... selected>
-struct list2_fill_as_list_1<type_list<all...>,type_list<selected...>>{
+struct embed_permutation_into_original<type_list<all...>,type_list<selected...>>{
     using result = typename list2_fill_as_list1_impl<type_list<all...>,type_list<selected...>,type_list<>,type_list<selected...>>::result;
 };

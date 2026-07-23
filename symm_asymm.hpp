@@ -24,7 +24,7 @@ struct calc_symm_tree<type_list<peeled_idxs...>, type_list<>, type_list<original
     template <typename datatype, typename... Idx>
     static auto exec(const Tensor<datatype, Idx...>& T) {
         using reordered_idxs =
-            typename list2_fill_as_list_1<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
+            typename embed_permutation_into_original<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
 
         return rename_by_list<reordered_idxs>::exec(T);
     }
@@ -79,7 +79,7 @@ struct calc_asymm_tree<type_list<peeled_idxs...>, type_list<>, type_list<origina
     template <typename datatype, typename... Idx>
     static auto exec(const Tensor<datatype, Idx...>& T) {
         using reordered_idxs =
-            typename list2_fill_as_list_1<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
+            typename embed_permutation_into_original<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
 
         return rename_by_list<reordered_idxs>::exec(T);
     }
@@ -132,6 +132,14 @@ auto symm(const Tensor<datatype, idxs...>& T) {
     static_assert(sizeof...(symm_idxs) > 1, "symm requires at least two indices");
     using symm_list = type_list<symm_idxs...>;
     using original_list = type_list<idxs...>;
+    static_assert((index_traits<symm_idxs>::is_index::value && ...),
+                  "symm arguments must be up<T> or dn<T> indices");
+    static_assert(!has_duplicate<symm_list>::value, "symm arguments must not repeat indices");
+    static_assert((is_contain<symm_idxs, original_list>::value && ...),
+                  "symm arguments must belong to the tensor index list");
+    using first_symm_idx = typename nth_type<0, symm_list>::result;
+    static_assert((is_same_variance<first_symm_idx, symm_idxs>::value && ...),
+                  "symm arguments must have the same variance");
     auto sum = calc_symm_tree<type_list<>, symm_list, original_list>::exec(T);
     return sum * (static_cast<datatype>(1) / static_cast<datatype>(factorial(sizeof...(symm_idxs))));
 }
@@ -141,6 +149,14 @@ auto asymm(const Tensor<datatype, idxs...>& T) {
     static_assert(sizeof...(asymm_idxs) > 1, "asymm requires at least two indices");
     using asymm_list = type_list<asymm_idxs...>;
     using original_list = type_list<idxs...>;
+    static_assert((index_traits<asymm_idxs>::is_index::value && ...),
+                  "asymm arguments must be up<T> or dn<T> indices");
+    static_assert(!has_duplicate<asymm_list>::value, "asymm arguments must not repeat indices");
+    static_assert((is_contain<asymm_idxs, original_list>::value && ...),
+                  "asymm arguments must belong to the tensor index list");
+    using first_asymm_idx = typename nth_type<0, asymm_list>::result;
+    static_assert((is_same_variance<first_asymm_idx, asymm_idxs>::value && ...),
+                  "asymm arguments must have the same variance");
     auto sum = calc_asymm_tree<type_list<>, asymm_list, original_list>::exec(T);
     return sum * (static_cast<datatype>(1) / static_cast<datatype>(factorial(sizeof...(asymm_idxs))));
 }

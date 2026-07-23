@@ -149,6 +149,42 @@ void test_asymm_rank3_all_indices() {
     }
 }
 
+void test_trace_scalar() {
+    Tensor<double, up<mu>, dn<nu>> t;
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = 0; j < 4; ++j) {
+            t(i, j) = 10.0 * static_cast<double>(i) + static_cast<double>(j);
+        }
+    }
+
+    auto tr = trace<mu, nu>(t);
+    check_true("trace rank2 returns scalar", std::is_same_v<decltype(tr), Tensor<double>>);
+    check_close("trace rank2 value", tr.data[0], 66.0, 1e-12);
+}
+
+void test_trace_with_free_index() {
+    Tensor<double, up<rho>, dn<mu>, up<nu>> t;
+    for (std::size_t r = 0; r < 4; ++r) {
+        for (std::size_t i = 0; i < 4; ++i) {
+            for (std::size_t j = 0; j < 4; ++j) {
+                t(r, i, j) = 100.0 * static_cast<double>(r) + 10.0 * static_cast<double>(i) +
+                             static_cast<double>(j);
+            }
+        }
+    }
+
+    auto tr = trace<mu, nu>(t);
+    check_true("trace preserves free index", std::is_same_v<decltype(tr), Tensor<double, up<rho>>>);
+
+    for (std::size_t r = 0; r < 4; ++r) {
+        double expected = 0.0;
+        for (std::size_t i = 0; i < 4; ++i) {
+            expected += t(r, i, i);
+        }
+        check_close("trace free-index component", tr(r), expected, 1e-12);
+    }
+}
+
 void test_partial_scalar_field() {
     coord<mu> x;
     x(0) = 1.25;
@@ -247,6 +283,8 @@ int main() {
     test_symm_rank3_selected_pair();
     test_asymm_rank2();
     test_asymm_rank3_all_indices();
+    test_trace_scalar();
+    test_trace_with_free_index();
     test_partial_scalar_field();
     test_partial_vector_field();
     test_partial_up_scalar_field();
