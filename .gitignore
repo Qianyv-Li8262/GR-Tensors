@@ -1,0 +1,4 @@
+*.exe
+/.vscode
+/.agents
+TMP_tensor_practice.cpp
