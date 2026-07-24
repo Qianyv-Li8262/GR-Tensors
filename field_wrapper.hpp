@@ -96,3 +96,15 @@ auto trace_field(const Field<F>& field) {
         return trace<LetterA, LetterB>(field(x));
     });
 }
+
+// Define a two-index tensor field variable template.
+//
+// Usage:
+//   DEFINE_TENSOR_FIELD2(g, metric);
+//   auto gx = g<mu, nu>(x);
+//   auto dg = partial_field<rho>(g<mu, nu>);
+#define DEFINE_TENSOR_FIELD2(field_name, tensor_function)                                                      \
+    template <typename FirstIndex, typename SecondIndex>                                                       \
+    inline auto field_name = make_field([](const auto& x) {                                                    \
+        return tensor_function<FirstIndex, SecondIndex>(x);                                                    \
+    })
