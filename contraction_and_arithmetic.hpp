@@ -272,7 +272,7 @@ auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RI
     using result_tensor_type = typename construct_tensor_from_list<datatype, free_indices>::result;
     using gemm_info = is_gemm<type_list<LIndices...>, type_list<RIndices...>, contract_letters>;
     result_tensor_type C{};
-    if constexpr (gemm_info::value) {
+    if constexpr (false) {
         if constexpr (!gemm_info::trans_A && !gemm_info::trans_B) {
             gemm_backend_0<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
         } else if constexpr (!gemm_info::trans_A && gemm_info::trans_B) {
