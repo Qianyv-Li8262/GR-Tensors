@@ -173,15 +173,17 @@ template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typena
           typename... RIndices, typename result_tensor_type>
 void gemm_backend_0(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
                     result_tensor_type& C) {
-    // L = [M][K]
-    // R = [K][N]
-    // C = [M][N]
-    // C initially zero
+    const datatype* l = L.data.data();
+    const datatype* r = R.data.data();
+    datatype* __restrict__ c = C.data.data();
+
+    // C already zero
     for (std::size_t i = 0; i < M; ++i) {
         for (std::size_t k = 0; k < K; ++k) {
-            const datatype a = L.data[i * K + k];
+            const datatype a = l[i * K + k];
+
             for (std::size_t j = 0; j < N; ++j) {
-                C.data[i * N + j] += a * R.data[k * N + j];
+                c[i * N + j] += a * r[k * N + j];
             }
         }
     }
@@ -191,13 +193,24 @@ template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typena
           typename... RIndices, typename result_tensor_type>
 void gemm_backend_1(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
                     result_tensor_type& C) {
+
+    const datatype* l = L.data.data();
+    const datatype* r = R.data.data();
+    datatype* __restrict__ c = C.data.data();
+    std::array<datatype, K * N> Rt;
+    for (std::size_t j = 0; j < N; ++j) {
+        for (std::size_t k = 0; k < K; ++k) {
+            Rt[k * N + j] = r[j * K + k];
+        }
+    }
     for (std::size_t i = 0; i < M; ++i) {
-        for (std::size_t j = 0; j < N; ++j) {
-            datatype sum = 0;
-            for (std::size_t k = 0; k < K; ++k) {
-                sum += L.data[i * K + k] * R.data[j * K + k];
+        for (std::size_t k = 0; k < K; ++k) {
+
+            const datatype a = l[i * K + k];
+
+            for (std::size_t j = 0; j < N; ++j) {
+                c[i * N + j] += a * Rt[k * N + j];
             }
-            C.data[i * N + j] = sum;
         }
     }
 }
@@ -206,12 +219,17 @@ template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typena
           typename... RIndices, typename result_tensor_type>
 void gemm_backend_2(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
                     result_tensor_type& C) {
-    // C initially zero
+    const datatype* l = L.data.data();
+    const datatype* r = R.data.data();
+    datatype* __restrict__ c = C.data.data();
+
+    // C already zero
     for (std::size_t k = 0; k < K; ++k) {
         for (std::size_t i = 0; i < M; ++i) {
-            const datatype a = L.data[k * M + i];
+            const datatype a = l[k * M + i];
+
             for (std::size_t j = 0; j < N; ++j) {
-                C.data[i * N + j] += a * R.data[k * N + j];
+                c[i * N + j] += a * r[k * N + j];
             }
         }
     }
@@ -221,27 +239,27 @@ template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typena
           typename... RIndices, typename result_tensor_type>
 void gemm_backend_3(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
                     result_tensor_type& C) {
-    // L physical: K x M
-    // R physical: N x K
-    //
-    // C = L^T * R^T
-    //   = (R * L)^T
-    //
-    // tmp = R * L : N x M
+    const datatype* l = L.data.data();
+    const datatype* r = R.data.data();
+    datatype* __restrict__ c = C.data.data();
+
     std::array<datatype, N * M> tmp{};
-    // 普通 NN: (N x K) * (K x M)
+
+    // tmp = R * L
     for (std::size_t j = 0; j < N; ++j) {
         for (std::size_t k = 0; k < K; ++k) {
-            const datatype b = R.data[j * K + k];
+            const datatype b = r[j * K + k];
+
             for (std::size_t i = 0; i < M; ++i) {
-                tmp[j * M + i] += b * L.data[k * M + i];
+                tmp[j * M + i] += b * l[k * M + i];
             }
         }
     }
+
     // C = tmp^T
     for (std::size_t i = 0; i < M; ++i) {
         for (std::size_t j = 0; j < N; ++j) {
-            C.data[i * N + j] = tmp[j * M + i];
+            c[i * N + j] = tmp[j * M + i];
         }
     }
 }
@@ -254,7 +272,7 @@ auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RI
     using result_tensor_type = typename construct_tensor_from_list<datatype, free_indices>::result;
     using gemm_info = is_gemm<type_list<LIndices...>, type_list<RIndices...>, contract_letters>;
     result_tensor_type C{};
-    if constexpr (gemm_info::value) {
+    if constexpr (false) {
         if constexpr (!gemm_info::trans_A && !gemm_info::trans_B) {
             gemm_backend_0<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
         } else if constexpr (!gemm_info::trans_A && gemm_info::trans_B) {
@@ -265,7 +283,6 @@ auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RI
             gemm_backend_3<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
         }
     } else {
-        // 原来的通用 contraction fallback
         using free_letters = typename extract_letters<free_indices>::result;
         using all_letters = typename concat<free_letters, contract_letters>::result;
         constexpr std::size_t num_all = list_size<all_letters>::value;
