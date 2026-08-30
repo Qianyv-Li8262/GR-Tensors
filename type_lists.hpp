@@ -26,7 +26,22 @@ template <typename... As, typename... Bs>
 struct concat<type_list<As...>, type_list<Bs...>> {
     using result = type_list<As..., Bs...>;
 };
-
+template <typename l1, typename l2>
+struct reverse_impl {};
+template <typename... l1>
+struct reverse_impl<type_list<l1...>, type_list<>> {
+    using result = type_list<l1...>;
+};
+template <typename... l1, typename head, typename... l2>
+struct reverse_impl<type_list<l1...>, type_list<head, l2...>> {
+    using result = typename reverse_impl<type_list<head, l1...>, type_list<l2...>>::result;
+};
+template <typename list1>
+struct reverse {};
+template <typename... list>
+struct reverse<type_list<list...>> {
+    using result = typename reverse_impl<type_list<>, type_list<list...>>::result;
+};
 template <typename List>
 struct list_size;
 template <typename... Ts>
@@ -137,7 +152,8 @@ struct is_unorder_same<type_list<Ts2...>, type_list<>> {
 };
 template <typename head, typename... Ts1, typename... Ts2>
 struct is_unorder_same<type_list<head, Ts1...>, type_list<Ts2...>> {
-    static constexpr bool value = is_unorder_same<type_list<Ts1...>, typename remove_all<head, type_list<Ts2...>>::result>::value;
+    static constexpr bool value =
+        is_unorder_same<type_list<Ts1...>, typename remove_all<head, type_list<Ts2...>>::result>::value;
 };
 
 
@@ -177,9 +193,28 @@ struct list2_fill_as_list1_impl<type_list<head_all, all...>, type_list<head_sele
                                  type_list<result_lett..., head_all>, type_list<original...>>>;
     using result = typename next_step::result;
 };
-template <typename all,typename selected>
-struct embed_permutation_into_original{};
-template <typename... all,typename... selected>
-struct embed_permutation_into_original<type_list<all...>,type_list<selected...>>{
-    using result = typename list2_fill_as_list1_impl<type_list<all...>,type_list<selected...>,type_list<>,type_list<selected...>>::result;
+template <typename all, typename selected>
+struct embed_permutation_into_original {};
+template <typename... all, typename... selected>
+struct embed_permutation_into_original<type_list<all...>, type_list<selected...>> {
+    using result = typename list2_fill_as_list1_impl<type_list<all...>, type_list<selected...>, type_list<>,
+                                                     type_list<selected...>>::result;
+};
+
+template <typename all, typename second>
+struct is_head_coincident {};
+template <typename... first>
+struct is_head_coincident<type_list<first...>, type_list<>> {
+    static constexpr bool value = true;
+};
+template <typename head, typename... first, typename... second>
+struct is_head_coincident<type_list<head, first...>, type_list<head, second...>>
+    : is_head_coincident<type_list<first...>, type_list<second...>> {};
+template <typename head1, typename head2, typename... first, typename... second>
+struct is_head_coincident<type_list<head1, first...>, type_list<head2, second...>> {
+    static constexpr bool value = false;
+};
+template <typename head, typename... second>
+struct is_head_coincident<type_list<>, type_list<head, second...>> {
+    static constexpr bool value = false;
 };

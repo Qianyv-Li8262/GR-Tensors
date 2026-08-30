@@ -144,21 +144,134 @@ struct find_index_from_letter<Letter, type_list<Head, Tail...>>
     : find_index_from_letter_impl<std::is_same_v<Letter, typename index_traits<Head>::letter>, Letter, Head,
                                   Tail...> {};
 
+template <typename LIndicies, typename RIndicies, typename con_letters>
+struct is_gemm {};
+template <typename... LIndicies, typename... RIndicies, typename... con_letters>
+struct is_gemm<type_list<LIndicies...>, type_list<RIndicies...>, type_list<con_letters...>> {
+    using Lletts = typename extract_letters<type_list<LIndicies...>>::result;
+    using Rletts = typename extract_letters<type_list<RIndicies...>>::result;
+    using Con = type_list<con_letters...>;
+    using RevL = typename reverse<Lletts>::result;
+    using RevR = typename reverse<Rletts>::result;
+    using RevCon = typename reverse<Con>::result;
+    static constexpr bool lefthead = is_head_coincident<Lletts, Con>::value;
+    static constexpr bool lefttail = is_head_coincident<RevL, RevCon>::value;
+    static constexpr bool righthead = is_head_coincident<Rletts, Con>::value;
+    static constexpr bool righttail = is_head_coincident<RevR, RevCon>::value;
+    static constexpr bool value = (lefthead || lefttail) && (righthead || righttail);
+    static constexpr bool trans_A = !lefttail;
+    static constexpr bool trans_B = !righthead;
+    static constexpr std::size_t contract_rank = sizeof...(con_letters);
+    static constexpr std::size_t left_free_rank = sizeof...(LIndicies) - contract_rank;
+    static constexpr std::size_t right_free_rank = sizeof...(RIndicies) - contract_rank;
+    static constexpr std::size_t M = pow4(left_free_rank);
+    static constexpr std::size_t K = pow4(contract_rank);
+    static constexpr std::size_t N = pow4(right_free_rank);
+};
+
+template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typename... LIndices,
+          typename... RIndices, typename result_tensor_type>
+void gemm_backend_0(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
+                    result_tensor_type& C) {
+    // L = [M][K]
+    // R = [K][N]
+    // C = [M][N]
+    // C initially zero
+    for (std::size_t i = 0; i < M; ++i) {
+        for (std::size_t k = 0; k < K; ++k) {
+            const datatype a = L.data[i * K + k];
+            for (std::size_t j = 0; j < N; ++j) {
+                C.data[i * N + j] += a * R.data[k * N + j];
+            }
+        }
+    }
+}
+
+template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typename... LIndices,
+          typename... RIndices, typename result_tensor_type>
+void gemm_backend_1(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
+                    result_tensor_type& C) {
+    for (std::size_t i = 0; i < M; ++i) {
+        for (std::size_t j = 0; j < N; ++j) {
+            datatype sum = 0;
+            for (std::size_t k = 0; k < K; ++k) {
+                sum += L.data[i * K + k] * R.data[j * K + k];
+            }
+            C.data[i * N + j] = sum;
+        }
+    }
+}
+
+template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typename... LIndices,
+          typename... RIndices, typename result_tensor_type>
+void gemm_backend_2(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
+                    result_tensor_type& C) {
+    // C initially zero
+    for (std::size_t k = 0; k < K; ++k) {
+        for (std::size_t i = 0; i < M; ++i) {
+            const datatype a = L.data[k * M + i];
+            for (std::size_t j = 0; j < N; ++j) {
+                C.data[i * N + j] += a * R.data[k * N + j];
+            }
+        }
+    }
+}
+
+template <std::size_t M, std::size_t N, std::size_t K, typename datatype, typename... LIndices,
+          typename... RIndices, typename result_tensor_type>
+void gemm_backend_3(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R,
+                    result_tensor_type& C) {
+    // L physical: K x M
+    // R physical: N x K
+    //
+    // C = L^T * R^T
+    //   = (R * L)^T
+    //
+    // tmp = R * L : N x M
+    std::array<datatype, N * M> tmp{};
+    // 普通 NN: (N x K) * (K x M)
+    for (std::size_t j = 0; j < N; ++j) {
+        for (std::size_t k = 0; k < K; ++k) {
+            const datatype b = R.data[j * K + k];
+            for (std::size_t i = 0; i < M; ++i) {
+                tmp[j * M + i] += b * L.data[k * M + i];
+            }
+        }
+    }
+    // C = tmp^T
+    for (std::size_t i = 0; i < M; ++i) {
+        for (std::size_t j = 0; j < N; ++j) {
+            C.data[i * N + j] = tmp[j * M + i];
+        }
+    }
+}
 
 template <typename datatype, typename... LIndices, typename... RIndices>
 auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R) {
     using result_impl = make_contraction_letters<type_list<LIndices..., RIndices...>, type_list<>, type_list<>>;
     using free_indices = typename result_impl::free;
-    using result_tensor_type = typename construct_tensor_from_list<datatype, typename result_impl::free>::result;
-    using free_letters = typename extract_letters<free_indices>::result;
     using contract_letters = typename result_impl::contract;
-    using all_letters = typename concat<free_letters, contract_letters>::result;
-    constexpr std::size_t num_all = list_size<all_letters>::value;
-
-    std::array<std::size_t, num_all> vals{};
+    using result_tensor_type = typename construct_tensor_from_list<datatype, free_indices>::result;
+    using gemm_info = is_gemm<type_list<LIndices...>, type_list<RIndices...>, contract_letters>;
     result_tensor_type C{};
-    free_loop<free_letters, all_letters, contract_letters>::exec(L, R, C, vals);
-
+    if constexpr (gemm_info::value) {
+        if constexpr (!gemm_info::trans_A && !gemm_info::trans_B) {
+            gemm_backend_0<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
+        } else if constexpr (!gemm_info::trans_A && gemm_info::trans_B) {
+            gemm_backend_1<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
+        } else if constexpr (gemm_info::trans_A && !gemm_info::trans_B) {
+            gemm_backend_2<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
+        } else {
+            gemm_backend_3<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
+        }
+    } else {
+        // 原来的通用 contraction fallback
+        using free_letters = typename extract_letters<free_indices>::result;
+        using all_letters = typename concat<free_letters, contract_letters>::result;
+        constexpr std::size_t num_all = list_size<all_letters>::value;
+        std::array<std::size_t, num_all> vals{};
+        free_loop<free_letters, all_letters, contract_letters>::exec(L, R, C, vals);
+    }
     return C;
 }
 
