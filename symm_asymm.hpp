@@ -1,134 +1,118 @@
 #pragma once
-#include "contraction_and_arithmetic.hpp"
 #include "tensor_class.hpp"
+#include "type_lists.hpp"
 #include <array>
-#include <cstdlib>
 #include <type_traits>
 #include <utility>
 
+template <std::size_t N>
+constexpr std::array<std::size_t, N> sort_small(std::array<std::size_t, N> values) {
+    for (std::size_t i = 1; i < N; ++i) {
+        const std::size_t value = values[i];
+        std::size_t j = i;
 
-template <typename idx_list>
-struct rename_by_list;
-template <typename... NewIdx>
-struct rename_by_list<type_list<NewIdx...>> {
-    template <typename datatype, typename... OldIdx>
-    static auto exec(const Tensor<datatype, OldIdx...>& T) {
-        return rename<NewIdx...>(T);
+        while (j > 0 && values[j - 1] > value) {
+            values[j] = values[j - 1];
+            --j;
+        }
+
+        values[j] = value;
+    }
+
+    return values;
+}
+
+template <std::size_t Rank, std::size_t... Positions>
+constexpr std::size_t canonical_index(std::size_t lin, std::index_sequence<Positions...>) {
+    auto full = unpack_index<Rank>(lin);
+
+    auto selected = sort_small(std::array<std::size_t, sizeof...(Positions)>{full[Positions]...});
+
+    std::size_t cursor = 0;
+    ((full[Positions] = selected[cursor++]), ...);
+
+    return pack_index(full);
+}
+
+template <std::size_t Rank, std::size_t... Positions>
+constexpr std::size_t orbit_size(std::size_t lin, std::index_sequence<Positions...>) {
+    const auto index = unpack_index<Rank>(lin);
+    std::array<std::size_t, 4> counts{};
+
+    ((++counts[index[Positions]]), ...);
+
+    std::size_t result = factorial(sizeof...(Positions));
+    for (std::size_t count : counts) {
+        result /= factorial(count);
+    }
+
+    return result;
+}
+
+template <std::size_t Rank, std::size_t... Positions>
+constexpr int permutation_sign(std::size_t lin, std::index_sequence<Positions...>) {
+    const auto index = unpack_index<Rank>(lin);
+    const std::array<std::size_t, sizeof...(Positions)> selected{index[Positions]...};
+    int sign = 1;
+
+    for (std::size_t i = 0; i < selected.size(); ++i) {
+        for (std::size_t j = i + 1; j < selected.size(); ++j) {
+            if (selected[i] == selected[j]) {
+                return 0;
+            }
+            if (selected[i] > selected[j]) {
+                sign = -sign;
+            }
+        }
+    }
+
+    return sign;
+}
+
+template <std::size_t Rank, std::size_t LinIdx, typename Positions>
+struct do_orbit_symm;
+
+template <std::size_t Rank, std::size_t LinIdx, std::size_t... Positions>
+struct do_orbit_symm<Rank, LinIdx, std::index_sequence<Positions...>> {
+    using positions = std::index_sequence<Positions...>;
+
+    template <typename datatype, typename... Indices>
+    static void accumulate(const Tensor<datatype, Indices...>& source, Tensor<datatype, Indices...>& result) {
+        constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+        result.data[representative] += source.data[LinIdx];
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_symm<Rank, LinIdx + 1, positions>::accumulate(source, result);
+        }
+    }
+
+    template <typename datatype, typename... Indices>
+    static void normalize(Tensor<datatype, Indices...>& result) {
+        constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+
+        if constexpr (representative == LinIdx) {
+            constexpr std::size_t size = orbit_size<Rank>(LinIdx, positions{});
+            result.data[LinIdx] = result.data[LinIdx] * (static_cast<datatype>(1) / static_cast<datatype>(size));
+        }
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_symm<Rank, LinIdx + 1, positions>::normalize(result);
+        }
+    }
+
+    template <typename datatype, typename... Indices>
+    static void broadcast(Tensor<datatype, Indices...>& result) {
+        constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+        result.data[LinIdx] = result.data[representative];
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_symm<Rank, LinIdx + 1, positions>::broadcast(result);
+        }
     }
 };
-
-template <typename list1, typename list2, typename original_list>
-struct calc_symm_tree {};
-template <typename... peeled_idxs, typename... original_idxs>
-struct calc_symm_tree<type_list<peeled_idxs...>, type_list<>, type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using reordered_idxs =
-            typename embed_permutation_into_original<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
-
-        return rename_by_list<reordered_idxs>::exec(T);
-    }
-};
-template <typename peeled_list, typename rest_list, typename choices_list, typename original_list>
-struct loop_symm_tree {};
-template <typename... peeled_idxs, typename... idxs, typename choice, typename... original_idxs>
-struct loop_symm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice>,
-                      type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using new_peeled = typename append_back<type_list<peeled_idxs...>, choice>::result;
-
-        using new_idxs = typename remove_first<choice, type_list<idxs...>>::result;
-
-        return calc_symm_tree<new_peeled, new_idxs, type_list<original_idxs...>>::exec(T);
-    }
-};
-template <typename... peeled_idxs, typename... idxs, typename choice, typename... choice_list,
-          typename... original_idxs>
-struct loop_symm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice, choice_list...>,
-                      type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using new_peeled = typename append_back<type_list<peeled_idxs...>, choice>::result;
-
-        using new_idxs = typename remove_first<choice, type_list<idxs...>>::result;
-
-        auto S = calc_symm_tree<new_peeled, new_idxs, type_list<original_idxs...>>::exec(T);
-
-        auto U = loop_symm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice_list...>,
-                                type_list<original_idxs...>>::exec(T);
-
-        return S + U;
-    }
-};
-
-template <typename... Peeled, typename... Rest, typename... Original>
-struct calc_symm_tree<type_list<Peeled...>, type_list<Rest...>, type_list<Original...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        return loop_symm_tree<type_list<Peeled...>, type_list<Rest...>, type_list<Rest...>,
-                              type_list<Original...>>::exec(T);
-    }
-};
-
-
-template <typename list1, typename list2, typename original_list>
-struct calc_asymm_tree {};
-template <typename... peeled_idxs, typename... original_idxs>
-struct calc_asymm_tree<type_list<peeled_idxs...>, type_list<>, type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using reordered_idxs =
-            typename embed_permutation_into_original<type_list<original_idxs...>, type_list<peeled_idxs...>>::result;
-
-        return rename_by_list<reordered_idxs>::exec(T);
-    }
-};
-template <typename peeled_list, typename rest_list, typename choices_list, typename original_list>
-struct loop_asymm_tree {};
-template <typename... peeled_idxs, typename... idxs, typename choice, typename... original_idxs>
-struct loop_asymm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice>,
-                       type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using new_peeled = typename append_back<type_list<peeled_idxs...>, choice>::result;
-
-        using new_idxs = typename remove_first<choice, type_list<idxs...>>::result;
-
-        return calc_asymm_tree<new_peeled, new_idxs, type_list<original_idxs...>>::exec(T);
-    }
-};
-template <typename... peeled_idxs, typename... idxs, typename choice, typename... choice_list,
-          typename... original_idxs>
-struct loop_asymm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice, choice_list...>,
-                       type_list<original_idxs...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        using new_peeled = typename append_back<type_list<peeled_idxs...>, choice>::result;
-
-        using new_idxs = typename remove_first<choice, type_list<idxs...>>::result;
-
-        auto S = calc_asymm_tree<new_peeled, new_idxs, type_list<original_idxs...>>::exec(T);
-
-        auto U = loop_asymm_tree<type_list<peeled_idxs...>, type_list<idxs...>, type_list<choice_list...>,
-                                 type_list<original_idxs...>>::exec(T);
-
-        return S - U;
-    }
-};
-
-template <typename... Peeled, typename... Rest, typename... Original>
-struct calc_asymm_tree<type_list<Peeled...>, type_list<Rest...>, type_list<Original...>> {
-    template <typename datatype, typename... Idx>
-    static auto exec(const Tensor<datatype, Idx...>& T) {
-        return loop_asymm_tree<type_list<Peeled...>, type_list<Rest...>, type_list<Rest...>,
-                               type_list<Original...>>::exec(T);
-    }
-};
-
 
 template <typename... symm_idxs, typename datatype, typename... idxs>
-auto symm(const Tensor<datatype, idxs...>& T) {
+auto symm_orbit(const Tensor<datatype, idxs...>& T) {
     static_assert(sizeof...(symm_idxs) > 1, "symm requires at least two indices");
     using symm_list = type_list<symm_idxs...>;
     using original_list = type_list<idxs...>;
@@ -140,12 +124,78 @@ auto symm(const Tensor<datatype, idxs...>& T) {
     using first_symm_idx = typename nth_type<0, symm_list>::result;
     static_assert((is_same_variance<first_symm_idx, symm_idxs>::value && ...),
                   "symm arguments must have the same variance");
-    auto sum = calc_symm_tree<type_list<>, symm_list, original_list>::exec(T);
-    return sum * (static_cast<datatype>(1) / static_cast<datatype>(factorial(sizeof...(symm_idxs))));
+
+    using positions = typename locate_find_in_list<symm_list, original_list>::result;
+    Tensor<datatype, idxs...> result{};
+
+    do_orbit_symm<sizeof...(idxs), 0, positions>::accumulate(T, result);
+    do_orbit_symm<sizeof...(idxs), 0, positions>::normalize(result);
+    do_orbit_symm<sizeof...(idxs), 0, positions>::broadcast(result);
+
+    return result;
 }
 
+template <std::size_t Rank, std::size_t LinIdx, typename Positions>
+struct do_orbit_asymm;
+
+template <std::size_t Rank, std::size_t LinIdx, std::size_t... Positions>
+struct do_orbit_asymm<Rank, LinIdx, std::index_sequence<Positions...>> {
+    using positions = std::index_sequence<Positions...>;
+
+    template <typename datatype, typename... Indices>
+    static void accumulate(const Tensor<datatype, Indices...>& source, Tensor<datatype, Indices...>& result) {
+        constexpr int sign = permutation_sign<Rank>(LinIdx, positions{});
+
+        if constexpr (sign != 0) {
+            constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+            if constexpr (sign > 0) {
+                result.data[representative] += source.data[LinIdx];
+            } else {
+                result.data[representative] -= source.data[LinIdx];
+            }
+        }
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_asymm<Rank, LinIdx + 1, positions>::accumulate(source, result);
+        }
+    }
+
+    template <typename datatype, typename... Indices>
+    static void normalize(Tensor<datatype, Indices...>& result) {
+        constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+        constexpr int sign = permutation_sign<Rank>(LinIdx, positions{});
+
+        if constexpr (representative == LinIdx && sign != 0) {
+            result.data[LinIdx] = result.data[LinIdx] * (static_cast<datatype>(1) /
+                                                         static_cast<datatype>(factorial(sizeof...(Positions))));
+        }
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_asymm<Rank, LinIdx + 1, positions>::normalize(result);
+        }
+    }
+
+    template <typename datatype, typename... Indices>
+    static void broadcast(Tensor<datatype, Indices...>& result) {
+        constexpr int sign = permutation_sign<Rank>(LinIdx, positions{});
+
+        if constexpr (sign != 0) {
+            constexpr std::size_t representative = canonical_index<Rank>(LinIdx, positions{});
+            if constexpr (sign > 0) {
+                result.data[LinIdx] = result.data[representative];
+            } else {
+                result.data[LinIdx] = -result.data[representative];
+            }
+        }
+
+        if constexpr (LinIdx + 1 < pow4(Rank)) {
+            do_orbit_asymm<Rank, LinIdx + 1, positions>::broadcast(result);
+        }
+    }
+};
+
 template <typename... asymm_idxs, typename datatype, typename... idxs>
-auto asymm(const Tensor<datatype, idxs...>& T) {
+auto asymm_orbit(const Tensor<datatype, idxs...>& T) {
     static_assert(sizeof...(asymm_idxs) > 1, "asymm requires at least two indices");
     using asymm_list = type_list<asymm_idxs...>;
     using original_list = type_list<idxs...>;
@@ -157,6 +207,13 @@ auto asymm(const Tensor<datatype, idxs...>& T) {
     using first_asymm_idx = typename nth_type<0, asymm_list>::result;
     static_assert((is_same_variance<first_asymm_idx, asymm_idxs>::value && ...),
                   "asymm arguments must have the same variance");
-    auto sum = calc_asymm_tree<type_list<>, asymm_list, original_list>::exec(T);
-    return sum * (static_cast<datatype>(1) / static_cast<datatype>(factorial(sizeof...(asymm_idxs))));
+
+    using positions = typename locate_find_in_list<asymm_list, original_list>::result;
+    Tensor<datatype, idxs...> result{};
+
+    do_orbit_asymm<sizeof...(idxs), 0, positions>::accumulate(T, result);
+    do_orbit_asymm<sizeof...(idxs), 0, positions>::normalize(result);
+    do_orbit_asymm<sizeof...(idxs), 0, positions>::broadcast(result);
+
+    return result;
 }

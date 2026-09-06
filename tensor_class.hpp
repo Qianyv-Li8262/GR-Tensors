@@ -44,7 +44,7 @@ constexpr std::size_t linear_index(Ints... idxs) {
 // 用途：
 //   reorder 时枚举新张量的线性下标，再映射回旧张量下标。
 template <std::size_t Rank>
-std::array<std::size_t, Rank> unpack_index(std::size_t lin) {
+constexpr std::array<std::size_t, Rank> unpack_index(std::size_t lin) {
     std::array<std::size_t, Rank> idx{};
 
     for (std::size_t rev = 0; rev < Rank; ++rev) {
@@ -60,7 +60,7 @@ std::array<std::size_t, Rank> unpack_index(std::size_t lin) {
 // pack_index(idx)
 // unpack_index 的逆操作。
 template <std::size_t Rank>
-std::size_t pack_index(const std::array<std::size_t, Rank>& idx) {
+constexpr std::size_t pack_index(const std::array<std::size_t, Rank>& idx) {
     std::size_t lin = 0;
 
     for (std::size_t i = 0; i < Rank; ++i) {

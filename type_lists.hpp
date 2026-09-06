@@ -1,5 +1,6 @@
 #pragma once
 #include <type_traits>
+#include <utility>
 
 template <typename... Ts>
 struct type_list {};
@@ -217,4 +218,12 @@ struct is_head_coincident<type_list<head1, first...>, type_list<head2, second...
 template <typename head, typename... second>
 struct is_head_coincident<type_list<>, type_list<head, second...>> {
     static constexpr bool value = false;
+};
+
+template <typename FindList, typename FullList>
+struct locate_find_in_list;
+
+template <typename... Find, typename... Full>
+struct locate_find_in_list<type_list<Find...>, type_list<Full...>> {
+    using result = std::index_sequence<static_cast<std::size_t>(find_obj<Find, type_list<Full...>>::value)...>;
 };
