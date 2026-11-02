@@ -17,6 +17,11 @@ struct Field {
     auto operator()(Args&&... args) const {
         return func(std::forward<Args>(args)...);
     }
+
+    template <typename... Args>
+    auto eval(Args&&... args) const {
+        return (*this)(std::forward<Args>(args)...);
+    }
 };
 template <typename F>
 Field(F) -> Field<F>;
@@ -38,7 +43,7 @@ auto make_field(F&& f) {
 template <typename F1, typename F2>
 auto operator+(const Field<F1>& a, const Field<F2>& b) {
     return make_field([a, b](const auto& x) {
-        return a(x) + b(x);
+        return a.eval(x) + b.eval(x);
     });
 }
 
@@ -46,7 +51,7 @@ auto operator+(const Field<F1>& a, const Field<F2>& b) {
 template <typename F1, typename F2>
 auto operator-(const Field<F1>& a, const Field<F2>& b) {
     return make_field([a, b](const auto& x) {
-        return a(x) - b(x);
+        return a.eval(x) - b.eval(x);
     });
 }
 
@@ -54,7 +59,7 @@ auto operator-(const Field<F1>& a, const Field<F2>& b) {
 template <typename F1, typename F2>
 auto operator*(const Field<F1>& a, const Field<F2>& b) {
     return make_field([a, b](const auto& x) {
-        return a(x) * b(x);
+        return a.eval(x) * b.eval(x);
     });
 }
 
@@ -62,7 +67,7 @@ auto operator*(const Field<F1>& a, const Field<F2>& b) {
 template <typename F>
 auto operator*(double scalar, const Field<F>& a) {
     return make_field([scalar, a](const auto& x) {
-        return scalar * a(x);
+        return scalar * a.eval(x);
     });
 }
 
@@ -77,7 +82,7 @@ auto operator*(const Field<F>& a, double scalar) {
 template <typename... NewIndices, typename F>
 auto rename_field(const Field<F>& field) {
     return make_field([field](const auto& x) {
-        return rename<NewIndices...>(field(x));
+        return rename<NewIndices...>(field.eval(x));
     });
 }
 
@@ -93,7 +98,7 @@ auto partial_field(const Field<F>& field, double h = 1e-2) {
 template <typename LetterA, typename LetterB, typename F>
 auto trace_field(const Field<F>& field) {
     return make_field([field](const auto& x) {
-        return trace<LetterA, LetterB>(field(x));
+        return trace<LetterA, LetterB>(field.eval(x));
     });
 }
 
@@ -101,7 +106,7 @@ auto trace_field(const Field<F>& field) {
 //
 // Usage:
 //   DEFINE_TENSOR_FIELD2(g, metric);
-//   auto gx = g<mu, nu>(x);
+//   auto gx = g<mu, nu>.eval(x);
 //   auto dg = partial_field<rho>(g<mu, nu>);
 #define DEFINE_TENSOR_FIELD2(field_name, tensor_function)                                                      \
     template <typename FirstIndex, typename SecondIndex>                                                       \

@@ -1,121 +1,18 @@
 #pragma once
 #include "Index_and_variance.hpp"
+#include "contraction_analysis.hpp"
+#include "contraction_executor.hpp"
 #include "tensor_class.hpp"
 #include "type_lists.hpp"
 #include <array>
 #include <cstdlib>
 #include <type_traits>
 #include <utility>
-template <typename contract_letters, typename all_letters>
-struct contract_loop;
-template <typename all_letters>
-struct contract_loop<type_list<>, all_letters> {
-    template <typename datatype, typename... left_idx, typename... right_idx, std::size_t N>
-    static void exec(const Tensor<datatype, left_idx...>& L, const Tensor<datatype, right_idx...>& R,
-                     std::array<std::size_t, N>& vals, datatype& sum) {
-        sum += L(vals[find_obj<typename index_traits<left_idx>::letter, all_letters>::value]...) *
-               R(vals[find_obj<typename index_traits<right_idx>::letter, all_letters>::value]...);
-    }
-};
-template <typename Head, typename... Tail, typename all_letters>
-struct contract_loop<type_list<Head, Tail...>, all_letters> {
-    template <typename datatype, typename... left_idx, typename... right_idx, std::size_t N>
-    static void exec(const Tensor<datatype, left_idx...>& L, const Tensor<datatype, right_idx...>& R,
-                     std::array<std::size_t, N>& vals, datatype& sum) {
-        constexpr std::size_t pos = find_obj<Head, all_letters>::value;
-        for (std::size_t i = 0; i < 4; ++i) {
-            vals[pos] = i;
-            contract_loop<type_list<Tail...>, all_letters>::exec(L, R, vals, sum);
-        }
-    }
-};
-
-
-template <typename FreeLetters, typename all_letters, typename contract_letters>
-struct free_loop;
-template <typename all_letters, typename contract_letters>
-struct free_loop<type_list<>, all_letters, contract_letters> {
-    template <typename datatype, typename... left_idx, typename... right_idx, typename... res_idx, std::size_t N>
-    static void exec(const Tensor<datatype, left_idx...>& L, const Tensor<datatype, right_idx...>& R,
-                     Tensor<datatype, res_idx...>& C, std::array<std::size_t, N>& vals) {
-        datatype sum = 0;
-        contract_loop<contract_letters, all_letters>::exec(L, R, vals, sum);
-        C(vals[find_obj<typename index_traits<res_idx>::letter, all_letters>::value]...) = sum;
-    }
-};
-template <typename Head, typename... Tail, typename all_letters, typename contract_letters>
-struct free_loop<type_list<Head, Tail...>, all_letters, contract_letters> {
-    template <typename datatype, typename... left_idx, typename... right_idx, typename... res_idx, std::size_t N>
-    static void exec(const Tensor<datatype, left_idx...>& L, const Tensor<datatype, right_idx...>& R,
-                     Tensor<datatype, res_idx...>& C, std::array<std::size_t, N>& vals) {
-        constexpr std::size_t pos = find_obj<Head, all_letters>::value;
-        for (std::size_t i = 0; i < 4; ++i) {
-            vals[pos] = i;
-            free_loop<type_list<Tail...>, all_letters, contract_letters>::exec(L, R, C, vals);
-        }
-    }
-};
-
-template <typename T1, typename T2>
-struct find_contract_letter {};
-template <typename obj>
-struct find_contract_letter<obj, type_list<>> {
-    static constexpr int value = 1;
-}; // letter not found, free letter
-template <typename obj, typename head, typename... Ts1>
-struct find_contract_letter<obj, type_list<head, Ts1...>> {
-    static constexpr int value =
-        std::is_same_v<typename index_traits<obj>::letter, typename index_traits<head>::letter>
-            ? (index_traits<obj>::variance::value == index_traits<head>::variance::value ? 0 : 2)
-            : find_contract_letter<obj, type_list<Ts1...>>::value;
-    static_assert(value != 0, "Invalid contraction due to same variance contraction.");
-};
-
-
-template <typename list1, typename result1, typename result2>
-struct make_contraction_letters {};
-template <typename list1, typename list2, typename list3, int code>
-struct make_contraction_letters_impl1 {};
-template <typename... Ts1, typename... Ts2>
-struct make_contraction_letters<type_list<>, type_list<Ts1...>, type_list<Ts2...>> {
-    using free = type_list<Ts1...>;
-    using contract = type_list<Ts2...>;
-};
-template <typename head, typename... Ts, typename... Ts1, typename... Ts2>
-struct make_contraction_letters_impl1<type_list<head, Ts...>, type_list<Ts1...>, type_list<Ts2...>, 1> {
-    using impl = make_contraction_letters<type_list<Ts...>, type_list<Ts1..., head>, type_list<Ts2...>>;
-    using free = typename impl::free;
-    using contract = typename impl::contract;
-};
-template <typename head, typename... Ts, typename... Ts1, typename... Ts2>
-struct make_contraction_letters_impl1<type_list<head, Ts...>, type_list<Ts1...>, type_list<Ts2...>, 2> {
-    using new_list = typename remove_all<typename opposite<head>::result, type_list<Ts...>>::result;
-    using impl = make_contraction_letters<new_list, type_list<Ts1...>,
-                                          type_list<Ts2..., typename index_traits<head>::letter>>;
-    using free = typename impl::free;
-    using contract = typename impl::contract;
-};
-template <typename head, typename... Ts, typename... Ts1, typename... Ts2>
-struct make_contraction_letters<type_list<head, Ts...>, type_list<Ts1...>, type_list<Ts2...>> {
-    static constexpr int cntr_res = find_contract_letter<head, type_list<Ts...>>::value;
-    using impl =
-        make_contraction_letters_impl1<type_list<head, Ts...>, type_list<Ts1...>, type_list<Ts2...>, cntr_res>;
-    using free = typename impl::free;
-    using contract = typename impl::contract;
-};
-
 template <typename datatype, typename List>
 struct construct_tensor_from_list;
 template <typename datatype, typename... Indices>
 struct construct_tensor_from_list<datatype, type_list<Indices...>> {
     using result = Tensor<datatype, Indices...>;
-};
-
-template <typename List>
-struct extract_letters;
-template <typename... Indices>
-struct extract_letters<type_list<Indices...>> {
-    using result = type_list<typename index_traits<Indices>::letter...>;
 };
 
 template <typename Letter, typename List>
@@ -266,32 +163,12 @@ void gemm_backend_3(const Tensor<datatype, LIndices...>& L, const Tensor<datatyp
 
 template <typename datatype, typename... LIndices, typename... RIndices>
 auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R) {
-    using result_impl = make_contraction_letters<type_list<LIndices..., RIndices...>, type_list<>, type_list<>>;
-    using free_indices = typename result_impl::free;
-    using contract_letters = typename result_impl::contract;
-    using result_tensor_type = typename construct_tensor_from_list<datatype, free_indices>::result;
-    using gemm_info = is_gemm<type_list<LIndices...>, type_list<RIndices...>, contract_letters>;
+    using analysis = contraction_analysis<type_list<LIndices...>, type_list<RIndices...>>;
+    using result_tensor_type = typename construct_tensor_from_list<datatype, typename analysis::free_indices>::result;
     result_tensor_type C{};
-    if constexpr (false) {
-        if constexpr (!gemm_info::trans_A && !gemm_info::trans_B) {
-            gemm_backend_0<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
-        } else if constexpr (!gemm_info::trans_A && gemm_info::trans_B) {
-            gemm_backend_1<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
-        } else if constexpr (gemm_info::trans_A && !gemm_info::trans_B) {
-            gemm_backend_2<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
-        } else {
-            gemm_backend_3<gemm_info::M, gemm_info::N, gemm_info::K>(L, R, C);
-        }
-    } else {
-        using free_letters = typename extract_letters<free_indices>::result;
-        using all_letters = typename concat<free_letters, contract_letters>::result;
-        constexpr std::size_t num_all = list_size<all_letters>::value;
-        std::array<std::size_t, num_all> vals{};
-        free_loop<free_letters, all_letters, contract_letters>::exec(L, R, C, vals);
-    }
+    C.data = contract_components<typename analysis::plan>(L.data, R.data);
     return C;
 }
-
 
 
 template <typename datatype, typename... Indices>

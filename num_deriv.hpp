@@ -44,7 +44,7 @@ auto partial_impl(const F& field, const coord<CoordLetter>& x, double h, DiffSch
             for (const auto& point : stencil) {
                 coord<CoordLetter> xs = x;
                 xs(a) += point.offset * h;
-                auto fs = field(xs);
+                auto fs = field.eval(xs);
 
                 for (std::size_t j = 0; j < orig_size; ++j) {
                     result.data[a * orig_size + j] += point.coeff * fs.data[j];
@@ -106,7 +106,7 @@ auto partial(const F& field, const coord<CoordLetter>& x, double h = 1e-2, DiffS
         }
         return std::abs(h) > 32.0 * std::numeric_limits<double>::epsilon() * scale;
     }());
-    auto sample = field(x);
+    auto sample = field.eval(x);
     return partial_impl<DerivLetter>(field, x, h, scheme, sample);
 }
 
@@ -119,7 +119,7 @@ template <typename UpLetter, typename DummyLetter, typename CoordLetter, typenam
 auto partial_up(const F& field, const InvMetricFunc& inv_metric, const coord<CoordLetter>& x, double h = 1e-2,
                 DiffScheme scheme = DiffScheme::Central8) {
     auto lower = partial<DummyLetter>(field, x, h, scheme);
-    auto ginv = rename<up<UpLetter>, up<DummyLetter>>(inv_metric(x));
+    auto ginv = rename<up<UpLetter>, up<DummyLetter>>(inv_metric.eval(x));
 
     return ginv * lower;
 }
