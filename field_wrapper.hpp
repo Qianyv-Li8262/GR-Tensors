@@ -2,6 +2,7 @@
 #include "contraction_and_arithmetic.hpp"
 #include "tensor_class.hpp"
 #include "num_deriv.hpp"
+#include "tensor_expression.hpp"
 #include <cstdlib>
 #include <type_traits>
 #include <utility>

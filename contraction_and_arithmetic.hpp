@@ -164,7 +164,8 @@ void gemm_backend_3(const Tensor<datatype, LIndices...>& L, const Tensor<datatyp
 template <typename datatype, typename... LIndices, typename... RIndices>
 auto operator*(const Tensor<datatype, LIndices...>& L, const Tensor<datatype, RIndices...>& R) {
     using analysis = contraction_analysis<type_list<LIndices...>, type_list<RIndices...>>;
-    using result_tensor_type = typename construct_tensor_from_list<datatype, typename analysis::free_indices>::result;
+    using result_tensor_type =
+        typename construct_tensor_from_list<datatype, typename analysis::free_indices>::result;
     result_tensor_type C{};
     C.data = contract_components<typename analysis::plan>(L.data, R.data);
     return C;
@@ -185,10 +186,23 @@ auto operator*(const Tensor<datatype, Indices...>& T, datatype scalar) {
     return scalar * T;
 }
 
-template <typename datatype, typename listleft, typename listright>
+template <int... N>
+struct add_plan {
+    static constexpr std::size_t rank = sizeof...(N);
+};
+
+
+template <typename Left, typename Right>
+struct analysis_plus_impl;
+template <typename... L, typename... R>
+struct analysis_plus_impl<type_list<L...>, type_list<R...>> {
+    using result = add_plan<find_obj<R, type_list<L...>>::value...>;
+};
+
+template <typename datatype, typename Plan>
 struct tensorplus_impl {};
-template <typename datatype, typename... listleft>
-struct tensorplus_impl<datatype, type_list<listleft...>, type_list<>> {
+template <typename datatype>
+struct tensorplus_impl<datatype, add_plan<>> {
     template <typename TensorType, std::size_t rank, std::size_t... Is>
     static decltype(auto) unpk(TensorType&& tensor, const std::array<std::size_t, rank>& index,
                                std::index_sequence<Is...>) {
@@ -203,19 +217,18 @@ struct tensorplus_impl<datatype, type_list<listleft...>, type_list<>> {
             unpk(U, indexright, std::make_index_sequence<rank>{});
     }
 };
-template <typename datatype, typename... listleft, typename righthead, typename... listright>
-struct tensorplus_impl<datatype, type_list<listleft...>, type_list<righthead, listright...>> {
+template <typename datatype, int N, int... Ns>
+struct tensorplus_impl<datatype, add_plan<N, Ns...>> {
     template <typename... left_idx, typename... right_idx, std::size_t rank>
     static void exec(const Tensor<datatype, left_idx...>& T, const Tensor<datatype, right_idx...>& U,
                      Tensor<datatype, left_idx...>& C, std::array<std::size_t, rank>& indexleft,
                      std::array<std::size_t, rank>& indexright) {
-        constexpr int leftpos = find_obj<righthead, type_list<left_idx...>>::value;
-        constexpr int rightpos = find_obj<righthead, type_list<right_idx...>>::value;
+        constexpr int rightpos = rank - sizeof...(Ns) - 1;
+        constexpr int leftpos = N;
         for (std::size_t i = 0; i < 4; ++i) {
             indexleft[leftpos] = i;
             indexright[rightpos] = i;
-            tensorplus_impl<datatype, type_list<listleft...>, type_list<listright...>>::exec(T, U, C, indexleft,
-                                                                                             indexright);
+            tensorplus_impl<datatype, add_plan<Ns...>>::exec(T, U, C, indexleft, indexright);
         }
     }
 };
@@ -225,11 +238,11 @@ auto operator+(const Tensor<datatype, left_idx...>& T, const Tensor<datatype, ri
     static_assert(is_unorder_same<type_list<left_idx...>, type_list<right_idx...>>::value,
                   "Invalid addition due to index non-compatitance");
     constexpr std::size_t rank = list_size<type_list<left_idx...>>::value;
+    using plan = typename analysis_plus_impl<type_list<left_idx...>, type_list<right_idx...>>::result;
     std::array<std::size_t, rank> indexleft{};
     std::array<std::size_t, rank> indexright{};
     Tensor<datatype, left_idx...> C;
-    tensorplus_impl<datatype, type_list<left_idx...>, type_list<right_idx...>>::exec(T, U, C, indexleft,
-                                                                                     indexright);
+    tensorplus_impl<datatype, plan>::exec(T, U, C, indexleft, indexright);
     return C;
 }
 
@@ -274,7 +287,6 @@ struct trace_loop<type_list<>, AllLetters, LetterA, LetterB> {
         result(vals[find_obj<typename index_traits<ResIdx>::letter, AllLetters>::value]...) = sum;
     }
 };
-// 鑷敱鎸囨爣閫掑綊锛氭瘡鍓ヤ竴涓嚜鐢卞瓧姣嶏紝鐢熸垚涓€灞?for
 template <typename Head, typename... Tail, typename AllLetters, typename LetterA, typename LetterB>
 struct trace_loop<type_list<Head, Tail...>, AllLetters, LetterA, LetterB> {
     template <typename datatype, typename... Indices, typename... ResIdx, std::size_t N>

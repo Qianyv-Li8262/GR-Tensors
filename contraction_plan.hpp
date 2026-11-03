@@ -56,51 +56,12 @@ public:
     static_assert(axes_are_unique(), "an operand axis must occur in at most one contraction pair");
 
     static constexpr std::size_t result_rank = count_in_range ? LeftRank + RightRank - 2 * contract_rank : 0;
-    static constexpr std::size_t loop_rank = result_rank + contract_rank;
     static constexpr std::size_t left_size = contraction_detail::component_count(left_rank);
     static constexpr std::size_t right_size = contraction_detail::component_count(right_rank);
     static constexpr std::size_t result_size = contraction_detail::component_count(result_rank);
 
-private:
-    struct layout {
-        std::array<std::size_t, LeftRank> left{};
-        std::array<std::size_t, RightRank> right{};
-    };
-
-    static constexpr layout make_layout() {
-        layout result{};
-        if constexpr (axes_in_range && count_in_range && axes_are_unique()) {
-            // No valid loop variable has the sentinel number loop_rank.
-            for (auto& slot : result.left) {
-                slot = loop_rank;
-            }
-            for (auto& slot : result.right) {
-                slot = loop_rank;
-            }
-
-            std::size_t sum_slot = result_rank;
-            ((result.left[Pairs::left] = sum_slot, result.right[Pairs::right] = sum_slot, ++sum_slot), ...);
-
-            std::size_t free_slot = 0;
-            for (auto& slot : result.left) {
-                if (slot == loop_rank) {
-                    slot = free_slot++;
-                }
-            }
-            for (auto& slot : result.right) {
-                if (slot == loop_rank) {
-                    slot = free_slot++;
-                }
-            }
-        }
-        return result;
+    // side == 0: left operand; side == 1: right operand.
+    static constexpr bool is_contracted(std::size_t axis, std::size_t side) {
+        return side == 0 ? ((Pairs::left == axis) || ...) : ((Pairs::right == axis) || ...);
     }
-
-    inline static constexpr auto layout_ = make_layout();
-
-public:
-    // Output coordinates occupy [0, result_rank); summation coordinates follow.
-    // These mappings are constant expressions, evaluated during compilation.
-    inline static constexpr auto left_slots = layout_.left;
-    inline static constexpr auto right_slots = layout_.right;
 };

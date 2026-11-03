@@ -14,8 +14,8 @@ using matrix_plan = contraction_plan<2, 2, contractpair<1, 0>>;
 static_assert(std::is_same_v<matrix_analysis::plan, matrix_plan>);
 static_assert(std::is_same_v<matrix_analysis::plan, renamed_analysis::plan>);
 static_assert(std::is_same_v<matrix_analysis::free_indices, type_list<up<a>, dn<c>>>);
-static_assert(matrix_plan::left_slots[0] == 0 && matrix_plan::left_slots[1] == 2);
-static_assert(matrix_plan::right_slots[0] == 2 && matrix_plan::right_slots[1] == 1);
+static_assert(!matrix_plan::is_contracted(0, 0) && matrix_plan::is_contracted(1, 0));
+static_assert(matrix_plan::is_contracted(0, 1) && !matrix_plan::is_contracted(1, 1));
 static_assert(std::is_empty_v<matrix_plan>);
 
 using fourth_rank_analysis =
@@ -24,10 +24,6 @@ using fourth_rank_plan = contraction_plan<4, 4, contractpair<1, 0>, contractpair
 static_assert(std::is_same_v<fourth_rank_analysis::plan, fourth_rank_plan>);
 static_assert(std::is_same_v<fourth_rank_plan::pairs, type_list<contractpair<1, 0>, contractpair<3, 3>>>);
 static_assert(fourth_rank_plan::result_rank == 4);
-static_assert(fourth_rank_plan::left_slots[0] == 0 && fourth_rank_plan::left_slots[1] == 4 &&
-              fourth_rank_plan::left_slots[2] == 1 && fourth_rank_plan::left_slots[3] == 5);
-static_assert(fourth_rank_plan::right_slots[0] == 4 && fourth_rank_plan::right_slots[1] == 2 &&
-              fourth_rank_plan::right_slots[2] == 3 && fourth_rank_plan::right_slots[3] == 5);
 
 int failures = 0;
 std::mt19937 generator(20261101);

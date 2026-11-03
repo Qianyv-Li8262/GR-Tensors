@@ -22,7 +22,8 @@ def main():
     flags = [compiler, "-std=c++17", "-Wall", "-Wextra", "-pedantic", "-I", str(root)]
     suffix = ".exe" if os.name == "nt" else ""
 
-    for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp", "main.cpp"]:
+    for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp",
+                          "tests/test_expression.cpp", "examples/metric_expression.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
         built = subprocess.run(flags + ["-O2", str(root / relative_path), "-o", str(executable)],
                                capture_output=True, text=True)
@@ -36,6 +37,9 @@ def main():
         print(f"PASS {relative_path}: {ran.stdout.strip()}")
 
     failures = {
+        "expression_duplicate_indices.cpp": "Tensor indices must not repeat",
+        "expression_same_variance.cpp": "Invalid contraction due to same variance contraction",
+        "expression_rename_variance.cpp": "rename may only change index letters",
         "same_variance.cpp": "Invalid contraction due to same variance contraction",
         "pair_out_of_range.cpp": "contraction pair axis is out of range",
         "repeated_left_axis.cpp": "an operand axis must occur in at most one contraction pair",

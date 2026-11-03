@@ -13,29 +13,9 @@ struct extract_letters<type_list<Indices...>> {
     using result = type_list<typename index_traits<Indices>::letter...>;
 };
 
-// Preserve the existing index checks and left-to-right result/summation order.
-template <typename Index, typename List>
-struct find_contract_letter;
-
-template <typename Index>
-struct find_contract_letter<Index, type_list<>> {
-    static constexpr int value = 1;
-};
-
-template <typename Index, typename Head, typename... Tail>
-struct find_contract_letter<Index, type_list<Head, Tail...>> {
-    static constexpr int value =
-        std::is_same_v<typename index_traits<Index>::letter, typename index_traits<Head>::letter>
-            ? (index_traits<Index>::variance::value == index_traits<Head>::variance::value ? 0 : 2)
-            : find_contract_letter<Index, type_list<Tail...>>::value;
-    static_assert(value != 0, "Invalid contraction due to same variance contraction.");
-};
-
+// Scan left to right: unmatched indices are free; opposite indices form a pair.
 template <typename Remaining, typename Free, typename Contracted>
 struct make_contraction_letters;
-
-template <typename Remaining, typename Free, typename Contracted, int Kind>
-struct make_contraction_letters_impl1;
 
 template <typename... Free, typename... Contracted>
 struct make_contraction_letters<type_list<>, type_list<Free...>, type_list<Contracted...>> {
@@ -44,19 +24,19 @@ struct make_contraction_letters<type_list<>, type_list<Free...>, type_list<Contr
 };
 
 template <typename Head, typename... Tail, typename... Free, typename... Contracted>
-struct make_contraction_letters_impl1<type_list<Head, Tail...>, type_list<Free...>, type_list<Contracted...>, 1>
-    : make_contraction_letters<type_list<Tail...>, type_list<Free..., Head>, type_list<Contracted...>> {};
-
-template <typename Head, typename... Tail, typename... Free, typename... Contracted>
-struct make_contraction_letters_impl1<type_list<Head, Tail...>, type_list<Free...>, type_list<Contracted...>, 2>
-    : make_contraction_letters<typename remove_all<typename opposite<Head>::result, type_list<Tail...>>::result,
-                               type_list<Free...>, type_list<Contracted..., typename index_traits<Head>::letter>> {
+struct make_contraction_letters<type_list<Head, Tail...>, type_list<Free...>, type_list<Contracted...>> {
+    static_assert(!is_contain<Head, type_list<Tail...>>::value,
+                  "Invalid contraction due to same variance contraction.");
+    using opposite_index = typename opposite<Head>::result;
+    static constexpr bool contracted = is_contain<opposite_index, type_list<Tail...>>::value;
+    using next = make_contraction_letters<
+        typename remove_all<opposite_index, type_list<Tail...>>::result,
+        std::conditional_t<contracted, type_list<Free...>, type_list<Free..., Head>>,
+        std::conditional_t<contracted, type_list<Contracted..., typename index_traits<Head>::letter>,
+                           type_list<Contracted...>>>;
+    using free = typename next::free;
+    using contract = typename next::contract;
 };
-
-template <typename Head, typename... Tail, typename... Free, typename... Contracted>
-struct make_contraction_letters<type_list<Head, Tail...>, type_list<Free...>, type_list<Contracted...>>
-    : make_contraction_letters_impl1<type_list<Head, Tail...>, type_list<Free...>, type_list<Contracted...>,
-                                     find_contract_letter<Head, type_list<Tail...>>::value> {};
 
 namespace contraction_detail {
 
