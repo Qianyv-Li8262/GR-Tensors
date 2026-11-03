@@ -58,9 +58,19 @@ auto C = A * B;
 
 指标的字母用于匹配，存储位置并不决定数学指标的顺序；需要改变字母而不改变上下指标位置时使用 `rename`。抬降指标不是 `rename` 的职责，应通过度规与张量乘法完成。
 
-## 缩并的两层接口
+## 缩并与取迹的两层接口
 
-指标分析与数值执行分离。配对、上下指标检查和输出轴顺序在编译期确定；计划直接保存多个 `contractpair<L, R>`，不再构造中间槽位映射。
+缩并和取迹的指标分析与数值执行分离。指标层负责字母匹配、上下指标检查和结果指标；执行层只接收位置计划与分量数组，不依赖 `Tensor` 或指标字母。相关计划和执行逻辑放在现有的 `contraction_*` 头文件中；加法保持 `contraction_and_arithmetic.hpp` 中的原实现。
+
+三种计划生成的外层入口统一通过 `::plan` 获取计划、`::free_indices` 获取结果指标，调用方不需要准备递归的空列表：
+
+```cpp
+using Add = addition_analysis<LeftIndices, RightIndices>;
+using Contract = contraction_analysis<LeftIndices, RightIndices>;
+using Trace = trace_analysis<Indices, LetterA, LetterB>;
+```
+
+`addition_analysis` 与加法原有的 `analysis_plus_impl`、`tensorplus_impl` 一起保留在 `contraction_and_arithmetic.hpp` 中；索引兼容性检查由外层入口负责。
 
 第一层根据指标类型生成计划，轴编号从零开始：
 
@@ -90,6 +100,19 @@ auto result = contract_components<Plan>(left, right); // std::array<double, 16>
 ```
 
 执行层仅依赖 `contraction_executor.hpp`。直接构造位置计划时，调用方负责张量的数学含义；轴越界、重复使用某一输入轴、分量数组大小不匹配均会在编译期被拒绝。按字母使用 `A * B` 时，上下指标兼容性由第一层检查。空 pair 包表示外积；完全缩并返回只有一个分量的数组。当前仍固定每轴四维。
+
+取迹用 `trace_plan<输入阶数, 轴A, 轴B>` 表示同一输入中需要取相同坐标并求和的两根轴，自由轴保留原存储顺序：
+
+```cpp
+using Analysis = trace_analysis<type_list<up<a>, dn<b>, up<c>, dn<d>>, a, d>;
+static_assert(std::is_same_v<Analysis::plan, trace_plan<4, 0, 3>>);
+static_assert(std::is_same_v<Analysis::free_indices, type_list<dn<b>, up<c>>>);
+
+std::array<double, 256> input{};
+auto result = trace_components<Analysis::plan>(input); // std::array<double, 16>
+```
+
+原来的 `trace<a, d>(tensor)` 接口在指标层生成上述计划再调用执行层；二阶张量取迹返回零阶 `Tensor`。缺失字母、相同字母或同为上/下指标会在分析层报错；直接指定位置时，执行前检查轴越界、两轴相同和数组大小不匹配。
 
 这层分离已经用于下面的缩并表达式树；当前尚未实现表达式 DAG 或场求值缓存。
 
@@ -159,9 +182,9 @@ python tests/run_tests.py --compiler clang++
 
 - `tensor_class.hpp`：张量容器、索引打包和分量访问。
 - `Index_and_variance.hpp`、`type_lists.hpp`：指标和编译期类型列表工具。
-- `contraction_analysis.hpp`：指标字母分析与编译期缩并计划生成。
-- `contraction_plan.hpp`：`contractpair<L, R>`、轴对列表、阶数及轴合法性检查。
-- `contraction_executor.hpp`：仅依据位置计划执行分量缩并。
+- `contraction_analysis.hpp`：缩并、取迹的指标分析与位置计划生成。
+- `contraction_plan.hpp`：`contraction_plan`、`trace_plan` 及位置合法性检查；缩并保留独立的 `contractpair<L, R>`。
+- `contraction_executor.hpp`：仅依据位置计划执行数组的缩并和取迹。
 - `tensor_expression.hpp`：具名函数叶子、缩并递归树及外层指标视图。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化与反对称化。

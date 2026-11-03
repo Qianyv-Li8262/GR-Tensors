@@ -15,32 +15,6 @@ struct construct_tensor_from_list<datatype, type_list<Indices...>> {
     using result = Tensor<datatype, Indices...>;
 };
 
-template <typename Letter, typename List>
-struct find_index_from_letter;
-
-template <bool Matches, typename Letter, typename Head, typename... Tail>
-struct find_index_from_letter_impl;
-
-template <typename Letter, typename Head, typename... Tail>
-struct find_index_from_letter_impl<true, Letter, Head, Tail...> {
-    using result = Head;
-};
-
-template <typename Letter, typename Head, typename... Tail>
-struct find_index_from_letter_impl<false, Letter, Head, Tail...> {
-    using result = typename find_index_from_letter<Letter, type_list<Tail...>>::result;
-};
-
-template <typename Letter>
-struct find_index_from_letter<Letter, type_list<>> {
-    static_assert(!std::is_same_v<Letter, Letter>, "trace index letter must exist in the tensor");
-};
-
-template <typename Letter, typename Head, typename... Tail>
-struct find_index_from_letter<Letter, type_list<Head, Tail...>>
-    : find_index_from_letter_impl<std::is_same_v<Letter, typename index_traits<Head>::letter>, Letter, Head,
-                                  Tail...> {};
-
 template <typename LIndicies, typename RIndicies, typename con_letters>
 struct is_gemm {};
 template <typename... LIndicies, typename... RIndicies, typename... con_letters>
@@ -199,6 +173,15 @@ struct analysis_plus_impl<type_list<L...>, type_list<R...>> {
     using result = add_plan<find_obj<R, type_list<L...>>::value...>;
 };
 
+// Public entry point: callers provide only operand indices, never accumulator lists.
+template <typename LeftIndices, typename RightIndices>
+struct addition_analysis {
+    static_assert(is_unorder_same<LeftIndices, RightIndices>::value,
+                  "Invalid addition due to index non-compatitance");
+    using free_indices = LeftIndices;
+    using plan = typename analysis_plus_impl<LeftIndices, RightIndices>::result;
+};
+
 template <typename datatype, typename Plan>
 struct tensorplus_impl {};
 template <typename datatype>
@@ -235,10 +218,8 @@ struct tensorplus_impl<datatype, add_plan<N, Ns...>> {
 
 template <typename datatype, typename... left_idx, typename... right_idx>
 auto operator+(const Tensor<datatype, left_idx...>& T, const Tensor<datatype, right_idx...>& U) {
-    static_assert(is_unorder_same<type_list<left_idx...>, type_list<right_idx...>>::value,
-                  "Invalid addition due to index non-compatitance");
     constexpr std::size_t rank = list_size<type_list<left_idx...>>::value;
-    using plan = typename analysis_plus_impl<type_list<left_idx...>, type_list<right_idx...>>::result;
+    using plan = typename addition_analysis<type_list<left_idx...>, type_list<right_idx...>>::plan;
     std::array<std::size_t, rank> indexleft{};
     std::array<std::size_t, rank> indexright{};
     Tensor<datatype, left_idx...> C;
@@ -265,66 +246,11 @@ auto rename(const Tensor<datatype, OldIndices...>& T) {
 }
 
 
-template <typename FreeLetters, typename AllLetters, typename LetterA, typename LetterB>
-struct trace_loop;
-template <typename AllLetters, typename LetterA, typename LetterB>
-struct trace_loop<type_list<>, AllLetters, LetterA, LetterB> {
-    template <typename datatype, typename... Indices, typename... ResIdx, std::size_t N>
-    static void exec(const Tensor<datatype, Indices...>& T, Tensor<datatype, ResIdx...>& result,
-                     std::array<std::size_t, N>& vals) {
-        constexpr std::size_t posA = find_obj<LetterA, AllLetters>::value;
-        constexpr std::size_t posB = find_obj<LetterB, AllLetters>::value;
-
-        datatype sum{};
-
-        for (std::size_t i = 0; i < 4; ++i) {
-            vals[posA] = i;
-            vals[posB] = i;
-
-            sum += T(vals[find_obj<typename index_traits<Indices>::letter, AllLetters>::value]...);
-        }
-
-        result(vals[find_obj<typename index_traits<ResIdx>::letter, AllLetters>::value]...) = sum;
-    }
-};
-template <typename Head, typename... Tail, typename AllLetters, typename LetterA, typename LetterB>
-struct trace_loop<type_list<Head, Tail...>, AllLetters, LetterA, LetterB> {
-    template <typename datatype, typename... Indices, typename... ResIdx, std::size_t N>
-    static void exec(const Tensor<datatype, Indices...>& T, Tensor<datatype, ResIdx...>& result,
-                     std::array<std::size_t, N>& vals) {
-        constexpr std::size_t pos = find_obj<Head, AllLetters>::value;
-
-        for (std::size_t i = 0; i < 4; ++i) {
-            vals[pos] = i;
-            trace_loop<type_list<Tail...>, AllLetters, LetterA, LetterB>::exec(T, result, vals);
-        }
-    }
-};
-
-
 template <typename LetterA, typename LetterB, typename datatype, typename... Indices>
 auto trace(const Tensor<datatype, Indices...>& T) {
-    using idx_list = type_list<Indices...>;
-
-    using idxA = typename find_index_from_letter<LetterA, idx_list>::result;
-    using idxB = typename find_index_from_letter<LetterB, idx_list>::result;
-    static_assert(!is_same_variance<idxA, idxB>::value,
-                  "Invalid contraction due to duplicate upper/lower indices");
-
-    using step1 = typename remove_first<idxA, idx_list>::result;
-    using result_indices = typename remove_first<idxB, step1>::result;
-
-    using result_tensor = typename construct_tensor_from_list<datatype, result_indices>::result;
-
-    using free_letters = typename extract_letters<result_indices>::result;
-    using all_letters = typename concat<free_letters, type_list<LetterA, LetterB>>::result;
-
-    constexpr std::size_t num_all = list_size<all_letters>::value;
-
+    using analysis = trace_analysis<type_list<Indices...>, LetterA, LetterB>;
+    using result_tensor = typename construct_tensor_from_list<datatype, typename analysis::free_indices>::result;
     result_tensor result{};
-    std::array<std::size_t, num_all> vals{};
-
-    trace_loop<free_letters, all_letters, LetterA, LetterB>::exec(T, result, vals);
-
+    result.data = trace_components<typename analysis::plan>(T.data);
     return result;
 }

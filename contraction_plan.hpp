@@ -23,6 +23,23 @@ constexpr std::size_t component_count(std::size_t rank) {
 
 } // namespace contraction_detail
 
+// Trace two distinct axes of one input; free axes keep their storage order.
+template <std::size_t Rank, std::size_t AxisA, std::size_t AxisB>
+struct trace_plan {
+    static_assert(AxisA < Rank && AxisB < Rank, "trace plan axis is out of range");
+    static_assert(AxisA != AxisB, "trace requires two distinct axes");
+    static constexpr std::size_t input_rank = Rank;
+    static constexpr std::size_t axis_a = AxisA;
+    static constexpr std::size_t axis_b = AxisB;
+    static constexpr std::size_t result_rank = Rank >= 2 ? Rank - 2 : 0;
+    static constexpr std::size_t input_size = contraction_detail::component_count(input_rank);
+    static constexpr std::size_t result_size = contraction_detail::component_count(result_rank);
+
+    static constexpr bool is_contracted(std::size_t axis) {
+        return axis == AxisA || axis == AxisB;
+    }
+};
+
 // No index letters and no runtime plan object. Output axes are the free left
 // axes followed by the free right axes, each in storage order. Pair order
 // determines summation order.

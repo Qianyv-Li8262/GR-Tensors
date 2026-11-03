@@ -150,6 +150,39 @@ void scalar_operands() {
     check("two scalar operands", scalar * scalar, scalar_expected);
 }
 
+void traces() {
+    Tensor<double, up<a>, dn<b>, up<c>, dn<d>> input;
+    fill(input);
+    using analysis = trace_analysis<type_list<up<a>, dn<b>, up<c>, dn<d>>, a, d>;
+    using renamed = trace_analysis<type_list<up<mu>, dn<nu>, up<rho>, dn<sigma>>, mu, sigma>;
+    static_assert(std::is_same_v<analysis::plan, trace_plan<4, 0, 3>>);
+    static_assert(std::is_same_v<analysis::plan, renamed::plan>);
+    static_assert(std::is_same_v<analysis::free_indices, type_list<dn<b>, up<c>>>);
+    static_assert(std::is_same_v<decltype(trace<a, d>(input)), Tensor<double, dn<b>, up<c>>>);
+
+    Tensor<double, dn<b>, up<c>> outer_expected;
+    Tensor<double, up<a>, dn<d>> middle_expected;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                outer_expected(i, j) += input(k, i, j, k);
+                middle_expected(i, j) += input(i, k, k, j);
+            }
+        }
+    }
+    check("trace outer axes", trace<a, d>(input), outer_expected);
+    check("trace reversed axes", trace<d, a>(input), outer_expected);
+    check("trace middle axes", trace<b, c>(input), middle_expected);
+
+    Tensor<double> double_expected;
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            double_expected() += input(i, j, j, i);
+        }
+    }
+    check("successive traces to scalar", trace<b, c>(trace<a, d>(input)), double_expected);
+}
+
 } // namespace
 
 int main() {
@@ -160,6 +193,7 @@ int main() {
         scalar_result();
         outer_product();
         scalar_operands();
+        traces();
     }
     if (failures != 0) {
         return 1;

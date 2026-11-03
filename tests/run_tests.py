@@ -54,6 +54,32 @@ def main():
                   file=sys.stderr)
             return 1
         print(f"PASS compile-time rejection: {filename}")
+
+    # Compile snippets from stdin so new plan checks need no extra source files.
+    invalid_plans = {
+        "trace axis out of range": (
+            "return trace_plan<2, 0, 2>::result_size;", "trace plan axis is out of range"),
+        "trace same axis": (
+            "return trace_plan<2, 0, 0>::result_size;", "trace requires two distinct axes"),
+        "trace shape mismatch": (
+            "trace_components<trace_plan<2, 0, 1>>(std::array<double, 4>{});",
+            "input component count does not match trace plan"),
+        "trace same variance": (
+            "trace<a, b>(Tensor<double, up<a>, up<b>>{});", "trace requires opposite index variance"),
+        "trace missing letter": (
+            "trace<a, c>(Tensor<double, up<a>, dn<b>>{});", "trace index letter must exist in the tensor"),
+        "trace repeated letter": (
+            "trace<a, a>(Tensor<double, up<a>, dn<b>>{});", "trace requires two distinct index letters"),
+    }
+    for name, (body, diagnostic) in invalid_plans.items():
+        source = '#include "contraction_and_arithmetic.hpp"\nint main() { ' + body + ' }\n'
+        built = subprocess.run(flags + ["-x", "c++", "-fsyntax-only", "-"], input=source,
+                               capture_output=True, text=True)
+        if built.returncode == 0 or diagnostic not in built.stdout + built.stderr:
+            print(f"FAIL expected compile-time diagnostic for {name}\n{built.stdout}{built.stderr}",
+                  file=sys.stderr)
+            return 1
+        print(f"PASS compile-time rejection: {name}")
     return 0
 
 

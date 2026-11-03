@@ -55,5 +55,32 @@ int main() {
             }
         }
     }
-    std::cout << "positional executor checks passed, including reordered pairs and unequal ranks\n";
+    // Trace also executes with no Tensor or index-letter dependency.
+    const auto traced = trace_components<trace_plan<4, 1, 3>>(crossed_left);
+    const auto reversed_trace = trace_components<trace_plan<4, 3, 1>>(crossed_left);
+    const auto vector_trace = trace_components<trace_plan<3, 0, 2>>(crossed_right);
+    for (std::size_t i = 0; i < 4; ++i) {
+        int vector_expected = 0;
+        for (std::size_t j = 0; j < 4; ++j) {
+            int trace_expected = 0;
+            vector_expected += crossed_right[(j * 4 + i) * 4 + j];
+            for (std::size_t k = 0; k < 4; ++k) {
+                trace_expected += crossed_left[((i * 4 + k) * 4 + j) * 4 + k];
+            }
+            if (traced[4 * i + j] != trace_expected || reversed_trace[4 * i + j] != trace_expected) {
+                return 1;
+            }
+        }
+        if (vector_trace[i] != vector_expected) {
+            return 1;
+        }
+    }
+    int scalar_expected = 0;
+    for (std::size_t i = 0; i < 4; ++i) {
+        scalar_expected += left[5 * i];
+    }
+    if (trace_components<trace_plan<2, 0, 1>>(left)[0] != scalar_expected) {
+        return 1;
+    }
+    std::cout << "contraction and trace executor checks passed without named-index dependencies\n";
 }

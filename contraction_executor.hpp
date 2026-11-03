@@ -79,3 +79,25 @@ std::array<Scalar, Plan::result_size> contract_components(const std::array<Scala
     }
     return result;
 }
+
+template <typename Plan, typename Scalar, std::size_t Size>
+std::array<Scalar, Plan::result_size> trace_components(const std::array<Scalar, Size>& input) {
+    static_assert(Size == Plan::input_size, "input component count does not match trace plan");
+    std::array<Scalar, Plan::result_size> result{};
+    std::array<std::size_t, Plan::input_rank> index{};
+    for (std::size_t output = 0; output < result.size(); ++output) {
+        auto remaining = output;
+        for (std::size_t axis = Plan::input_rank; axis > 0; --axis) {
+            if (!Plan::is_contracted(axis - 1)) {
+                index[axis - 1] = remaining % 4;
+                remaining /= 4;
+            }
+        }
+        for (std::size_t i = 0; i < 4; ++i) {
+            index[Plan::axis_a] = i;
+            index[Plan::axis_b] = i;
+            result[output] += contraction_detail::component_at(input, index);
+        }
+    }
+    return result;
+}

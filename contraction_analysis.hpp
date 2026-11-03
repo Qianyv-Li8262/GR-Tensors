@@ -73,3 +73,22 @@ struct contraction_analysis<type_list<Left...>, type_list<Right...>> {
     using plan =
         typename contraction_detail::plan_from_letters<left_letters, right_letters, contract_letters>::type;
 };
+
+template <typename Indices, typename LetterA, typename LetterB>
+struct trace_analysis;
+
+template <typename... Indices, typename LetterA, typename LetterB>
+struct trace_analysis<type_list<Indices...>, LetterA, LetterB> {
+    using indices = type_list<Indices...>;
+    using letters = typename extract_letters<indices>::result;
+    static_assert(!std::is_same_v<LetterA, LetterB>, "trace requires two distinct index letters");
+    static_assert(is_contain<LetterA, letters>::value && is_contain<LetterB, letters>::value,
+                  "trace index letter must exist in the tensor");
+
+    using plan = trace_plan<sizeof...(Indices), find_obj<LetterA, letters>::value,
+                           find_obj<LetterB, letters>::value>;
+    using idxA = typename nth_type<plan::axis_a, indices>::result;
+    using idxB = typename nth_type<plan::axis_b, indices>::result;
+    static_assert(!is_same_variance<idxA, idxB>::value, "trace requires opposite index variance");
+    using free_indices = typename remove_first<idxB, typename remove_first<idxA, indices>::result>::result;
+};
