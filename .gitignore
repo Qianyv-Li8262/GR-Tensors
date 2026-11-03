@@ -6,3 +6,6 @@ TMP_tensor_practice.cpp
 start_claude.ps1
 /misc/
 /tests/.build/
+*.txt
+*.md
+!README.md

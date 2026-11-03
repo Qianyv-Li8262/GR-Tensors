@@ -165,11 +165,17 @@ void check_derivative_scheme() {
     const auto field = make_field<&monomial_field<Power>>();
     const auto derivative = partial_field<mu, Scheme>(field);
     using tree = typename decltype(derivative)::node_type;
-    using direction = typename nth_type<0, typename tree::children>::result;
-    static_assert(list_size<typename tree::children>::value == 4);
+    using sampled = typename expression_detail::partial_samples<typename decltype(field)::node_type, Scheme>::result;
+    using direction = typename nth_type<0, typename sampled::children>::result;
+    static_assert(list_size<typename tree::children>::value == 1);
+    static_assert(list_size<typename sampled::children>::value == 4);
     static_assert(list_size<typename direction::children>::value == Points);
     static_assert(std::is_same_v<typename decltype(derivative)::result_type, Tensor<double, dn<mu>, up<a>>>);
     check(derivative_calls == 0, "building a derivative must not evaluate the source");
+    check(derivative.formula().find("PartialExpr") != std::string_view::npos,
+          "formula must expose the mathematical derivative type");
+    check(derivative.formula().find("StencilSumExpr") == std::string_view::npos,
+          "formula must not contain sampling subtrees");
 
     coord<mu> x;
     x.data = {0.5, 0.75, 1.0, 1.25};
@@ -203,7 +209,11 @@ void check_derivatives() {
     const auto shifted = expand_at<offset<1, -1, 0, 0>>(second);
     const auto reset = expand_at<>(shifted);
     using tree = typename decltype(second)::node_type;
-    using outer0 = typename nth_type<0, typename tree::children>::result;
+    static_assert(list_size<typename tree::children>::value == 1);
+    using sampled_first = typename expression_detail::partial_samples<FieldExpr<&polynomial_field>,
+                                                                      DiffScheme::Central2>::result;
+    using sampled_second = typename expression_detail::partial_samples<sampled_first, DiffScheme::Central2>::result;
+    using outer0 = typename nth_type<0, typename sampled_second::children>::result;
     using negative = typename nth_type<0, typename outer0::children>::result;
     using positive = typename nth_type<1, typename outer0::children>::result;
     using negative0 = typename nth_type<0, typename negative::children>::result;
@@ -290,6 +300,46 @@ void check_derivatives() {
     }
 }
 
+void check_mathematical_operations() {
+    const auto a = make_field<&coordinate_field>();
+    const auto b = rename_field<up<::b>>(make_field<&monomial_field<2>>());
+    const auto c = rename_field<up<::c>>(make_field<&monomial_field<3>>());
+    const auto left = a * b * c;
+    const auto right = c * a * b;
+    const auto expression = (left + right) - scale_field<1, 2>(right);
+    static_assert(std::is_same_v<typename decltype(expression)::formula_type,
+                                 std::remove_cv_t<decltype(expression)>>);
+    coord<mu> x;
+    x.data = {0.5, 0.75, 1.0, 1.25};
+    const auto result = expression.eval(x);
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            for (int k = 0; k < 4; ++k) {
+                check(close(result(i, j, k), 1.5 * x(i) * std::pow(x(j), 2) * std::pow(x(k), 3)),
+                      "mathematical addition/subtraction must respect index permutations");
+            }
+        }
+    }
+    const auto g = make_field<&metric>();
+    const int before = metric_calls;
+    const auto inverse = inverse_field(g);
+    check(metric_calls == before, "inverse expression construction must not sample its operand");
+    const auto inverse_value = inverse.eval(x);
+    const auto expected_inverse = inverse_metric(x);
+    for (int i = 0; i < 4; ++i) {
+        for (int j = 0; j < 4; ++j) {
+            check(close(inverse_value(i, j), expected_inverse(i, j)), "inverse node must match analytic dense inverse");
+        }
+    }
+    const auto identity = g * rename_field<up<::b>, up<::c>>(inverse);
+    check(close(trace_field<::a, ::c>(identity).eval(x)(), 4.0), "trace must compose with mathematical nodes");
+    const auto derivative = partial_field<nu, DiffScheme::Central4>(scale_field<1, 2>(identity + identity));
+    const auto differentiated = derivative.eval(x, 0.125);
+    for (auto value : differentiated.data) {
+        check(std::abs(value) < 1e-11, "derivatives must compose with add, scale and inverse nodes");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -371,6 +421,7 @@ int main() {
     }
     check_offsets();
     check_derivatives();
+    check_mathematical_operations();
     if (failures) {
         return 1;
     }

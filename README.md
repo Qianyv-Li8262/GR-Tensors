@@ -13,7 +13,7 @@
 - 指定指标位置的对称化 `symm_orbit` 与反对称化 `asymm_orbit`。
 - `Field` 包装器，用于把坐标到张量的映射组合成场表达式。
 - `make_field<&function>()`：以具名函数作为类型化叶子，用 `*` 构造缩并表达式递归树。
-- 数值偏导 `partial`：编译期选择二、四、六、八阶中心差分，默认八阶；类型化表达式的偏导直接展开成带 offset 的采样子树。`partial_up` 使用逆度规将导数指标抬升。
+- 数值偏导 `partial`：编译期选择二、四、六、八阶中心差分，默认八阶；数学类型保留未展开的偏导节点，数值求值沿用采样执行。`partial_up` 使用逆度规将导数指标抬升。
 
 `diff_forms.hpp` 目前只是占位头文件，尚未提供微分形式运算。
 
@@ -170,20 +170,63 @@ auto shifted_expression = expand_at<O>(expression);
 auto shifted_result = shifted_expression.eval(x, 0.01);
 ```
 
-`expand<Node, O>::result` 由根向下确定节点位置：普通运算传递相同位置，偏导分支叠加各自的差分偏移。`expand_at<O>(expression)` 同时创建对应对象，保留指标和轴对计划，建树时不调用函数。`O` 是根节点相对 `x` 的绝对中心位置，重复展开会替换中心并保留各差分分支的相对偏移，`expand_at<>(expression)` 恢复零中心。普通缩并要求左右操作数与父节点具有相同 offset；不同采样位置会产生不同节点类型。
+`expand<Node, O>::result` 由根向下确定节点位置：数学节点传递相同位置，保留偏导操作本身；已有采样执行节点则保留各自的差分位移。`expand_at<O>(expression)` 同时创建对应对象，建树时不调用函数。`O` 是根节点相对 `x` 的绝对中心位置，`expand_at<>(expression)` 恢复零中心。普通缩并要求左右操作数与父节点具有相同 offset；不同采样位置会产生不同节点类型。
 
-这一接口目前支持场之间的 `*`、指标改名、偏导和求值；一般加减法及直接数值常量的乘法尚未编码为树节点。原有 `make_field(callable)`、`Tensor * Tensor` 接口继续使用原来的行为；两种场接口暂不混合组合。
+这一接口支持场之间的 `+`、`-`、`*`、指标改名、取迹、度规求逆、偏导和求值。`scale_field<1, 2>(expr)` 将有理系数编码为 `std::ratio<1, 2>`，避免 C++17 浮点模板参数的限制。加法的数学节点使用原有 `addition_analysis` 生成的轴置换计划；`contraction_and_arithmetic.hpp` 中的 Tensor 加法保持原实现。原有 callable `Field` 接口继续可用，两种场接口暂不混合组合。
 
-### 编译期偏导展开
+### 查看 K 的数学类型
 
-包含 `num_deriv.hpp` 或 `tensors_all.hpp` 后，将差分策略写入模板参数：
+`IndexedExpr::formula_type` 就是完整的数学表达式类型。`expr.formula()` 直接返回编译器的 `__PRETTY_FUNCTION__` 或 `__FUNCSIG__`；不会调用函数、求值或展开偏导采样，也没有额外的公式打印器。
+
+[`examples/kretschmann_formula.cpp`](examples/kretschmann_formula.cpp) 在 `main()` 中现场创建度规叶子、逆度规、偏导、Christoffel、Riemann 和 K。度规函数本身定义在外部，表达式对象与所有组合均在 `main()` 内：
 
 ```cpp
-// 建树时不求值。每个方向生成 8 个 expression 的采样子树，共 32 个。
+auto g = make_field<&metric>();
+auto inverse = inverse_field(g);
+auto pg = partial_field<mu, DiffScheme::Central8>(g);
+// 同一 main() 中继续组合 Gamma、pGamma、R_lower、R_upper，完整代码见示例。
+auto K = R_lower * R_upper;
+using Formula = decltype(K)::formula_type;
+std::cout << K.formula() << '\n';
+```
+
+逆度规由 `InverseExpr<FieldExpr<&metric>>` 表示；Gamma、R 的函数负责组合表达式，所以它们会内联进入 K 的类型，只有度规函数是叶子。`PartialExpr<Operand, Scheme, Offset>` 保留原操作数，`children` 只有一棵子树。K 的构造和类型检查均不生成采样分支。
+
+```bash
+clang++ -std=c++17 -O0 -I . examples/kretschmann_formula.cpp -o kretschmann_formula
+./kretschmann_formula         # 类型统计
+./kretschmann_formula --type  # 编译器吐出的完整 K.formula()
+```
+
+当前数学树有 191 个节点位置、21 种不同节点类型、54 处度规叶子、40 处未展开偏导，最大偏导嵌套为 2，采样节点为 0。Clang 给出的完整签名长 11,507 个字符。不同节点类型数是对这棵数学树的类型统计，不代表已做 CSE，也不是编译器所有模板实例化的总数。此示例只检查数学类型，不对 K 做数值求值或解析对照。
+
+[`examples/kretschmann_formula.hpp`](examples/kretschmann_formula.hpp) 还保留可复用的构造函数供独立数值对照使用；编译期断言检查它与 `main()` 内现场构造的类型完全相同。另一个独立程序 [`examples/kretschmann_compare.cpp`](examples/kretschmann_compare.cpp) 使用该数学类型做数值求值，与手推的度规零、一、二阶导数表达式对照；推导全文见 [`examples/kretschmann_manual.md`](examples/kretschmann_manual.md)。它同时检查全部 256 个 Riemann 分量，以及 `K=48M^2/r^6`：
+
+```bash
+clang++ -std=c++17 -O0 -I . examples/kretschmann_compare.cpp -o kretschmann_compare
+./kretschmann_compare
+```
+
+在三组坐标、两种步长的六组检查中，K 相对解析参考的最大误差约为 `3.56e-10`。这是独立解析参考与现有有限差分执行的数值验证；数学类型里的偏导仍未展开，CSE 也尚未实现。
+
+### Bach 张量的四层偏导示例
+
+[`examples/bach_tensor.cpp`](examples/bach_tensor.cpp) 在 `main()` 中从一个度规叶子组合 `Gamma -> Riemann -> Ricci/Weyl -> 两层协变导数 -> Bach`，每层协变导数均显式包含全部联络项，直接使用现有表达式操作。数学树保留四层偏导，具有 12,160 个节点位置；完整编译器类型见 [`outputs/bach_formula_type_central2.txt`](outputs/bach_formula_type_central2.txt)。没有修改库执行器或加入 CSE。
+
+示例默认使用编译期 `Central2`，编译时增加 `-DBACH_CENTRAL4` 可比较四阶中心差分。四种背景包括具有非零解析 Bach 的常曲率曲面乘积及其共形变换，以及两个 Bach 为零的背景；每种背景扫描四组步长，核对全部 16 个 Bach 和 256 个 Weyl 分量。公式、独立解析推导与复现命令见 [`examples/bach_manual.md`](examples/bach_manual.md)，数值结果见 [`outputs/bach_comparison.md`](outputs/bach_comparison.md)。
+
+### 数学偏导与现有采样执行
+
+包含 `tensor_expression.hpp` 或 `tensors_all.hpp` 后，将差分策略写入模板参数：
+
+```cpp
+// 建树时保留一个数学偏导节点，不生成采样子树。
 auto derivative = partial_field<rho, DiffScheme::Central8>(expression);
+std::cout << derivative.formula() << '\n';
+// 数值求值仍可使用原有的差分采样执行。
 auto values = derivative.eval(x, 0.01);
 
-// 嵌套偏导直接继续展开；结果最前面依次是 sigma、rho 两根导数轴。
+// 数学树保留嵌套偏导；结果最前面依次是 sigma、rho 两根导数轴。
 auto second = partial_field<sigma, DiffScheme::Central2>(derivative);
 auto second_values = second.eval(x, 0.01);
 
@@ -192,7 +235,7 @@ auto same_tree = partial<rho, DiffScheme::Central8>(expression);
 auto same_values = partial<rho, DiffScheme::Central8>(expression, x, 0.01);
 ```
 
-`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。`PartialExpr` 包含四个方向的 `StencilSumExpr`；每个加权和节点通过 `children` 暴露该方向所有带 offset 的原表达式子树，按固定权重求和后除以 `h`。原表达式如果是缩并，每个采样分支都会包含完整的缩并子树。
+`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。数学节点 `PartialExpr` 与执行节点 `SampledPartialExpr` 分离；只有调用 `.eval()` 时才使用原有的四方向 `StencilSumExpr` 采样执行。加权和节点按固定权重求和后除以 `h`，本次未加入 CSE。
 
 嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。运行时仍分别执行各采样路径，尚未做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
 
@@ -226,9 +269,9 @@ python tests/run_tests.py --compiler clang++
 - `contraction_analysis.hpp`：缩并、取迹的指标分析与位置计划生成。
 - `contraction_plan.hpp`：`contraction_plan`、`trace_plan` 及位置合法性检查；缩并保留独立的 `contractpair<L, R>`。
 - `contraction_executor.hpp`：仅依据位置计划执行数组的缩并和取迹。
-- `tensor_expression.hpp`：具名函数叶子、缩并递归树、外层指标视图及编译期 offset 展开。
+- `tensor_expression.hpp`：数学表达式节点、编译器类型查看接口、偏导采样执行和 offset 传递。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化与反对称化。
 - `field_wrapper.hpp`：callable 张量场封装。
-- `num_deriv.hpp`：编译期差分策略、偏导采样树、偏导 offset 展开与数值求值接口。
+- `num_deriv.hpp`：编译期差分策略、步长检查和 callable 数值偏导接口。
 - `main.cpp`：Schwarzschild/Kretschmann 端到端示例。

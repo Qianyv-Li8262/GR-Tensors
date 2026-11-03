@@ -23,9 +23,12 @@ def main():
     suffix = ".exe" if os.name == "nt" else ""
 
     for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp",
-                          "tests/test_expression.cpp", "examples/metric_expression.cpp", "main.cpp"]:
+                          "tests/test_expression.cpp", "examples/metric_expression.cpp",
+                          "examples/kretschmann_formula.cpp", "examples/kretschmann_compare.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
-        built = subprocess.run(flags + ["-O2", str(root / relative_path), "-o", str(executable)],
+        # The comparison instantiates the unshared sampled K tree; avoid expensive inlining in this diagnostic.
+        optimization = "-O0" if relative_path == "examples/kretschmann_compare.cpp" else "-O2"
+        built = subprocess.run(flags + [optimization, str(root / relative_path), "-o", str(executable)],
                                capture_output=True, text=True)
         if built.returncode:
             print(built.stdout + built.stderr, file=sys.stderr)
