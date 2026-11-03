@@ -2,6 +2,7 @@
 
 #include "contraction_and_arithmetic.hpp"
 #include "num_deriv.hpp"
+#include "symm_asymm.hpp"
 #include <algorithm>
 #include <array>
 #include <ratio>
@@ -168,6 +169,42 @@ struct TraceExpr {
     template <typename Coordinate>
     auto eval_components(const Coordinate& x, double h = 1e-2) const {
         return trace_components<Plan>(operand.eval_components(x, h));
+    }
+};
+
+template <typename Node, typename SymPlan, typename PointOffset = offset<>>
+struct SymExpr {
+    using Plan = SymPlan;
+    using point_offset = PointOffset;
+    using scalar_type = typename Node::scalar_type;
+    using children = type_list<Node>;
+    static constexpr std::size_t rank = Node::rank;
+    static_assert(rank == Plan::input_rank, "symmetry expression rank must match the plan");
+    static_assert(!Plan::antisymmetric, "SymExpr requires a sym_plan");
+    static_assert(std::is_same_v<typename Node::point_offset, point_offset>, "symmetry offsets must match");
+    Node operand;
+
+    template <typename Coordinate>
+    auto eval_components(const Coordinate& x, double h = 1e-2) const {
+        return sym_components<Plan>(operand.eval_components(x, h));
+    }
+};
+
+template <typename Node, typename AsymPlan, typename PointOffset = offset<>>
+struct AsymExpr {
+    using Plan = AsymPlan;
+    using point_offset = PointOffset;
+    using scalar_type = typename Node::scalar_type;
+    using children = type_list<Node>;
+    static constexpr std::size_t rank = Node::rank;
+    static_assert(rank == Plan::input_rank, "symmetry expression rank must match the plan");
+    static_assert(Plan::antisymmetric, "AsymExpr requires an asym_plan");
+    static_assert(std::is_same_v<typename Node::point_offset, point_offset>, "symmetry offsets must match");
+    Node operand;
+
+    template <typename Coordinate>
+    auto eval_components(const Coordinate& x, double h = 1e-2) const {
+        return asym_components<Plan>(operand.eval_components(x, h));
     }
 };
 
@@ -555,6 +592,22 @@ struct expand<InverseExpr<Node, OldOffset>, PointOffset> {
     }
 };
 
+template <typename Node, typename Plan, typename OldOffset, typename PointOffset>
+struct expand<SymExpr<Node, Plan, OldOffset>, PointOffset> {
+    using result = SymExpr<typename expand<Node, PointOffset>::result, Plan, PointOffset>;
+    static result exec(const SymExpr<Node, Plan, OldOffset>& node) {
+        return {expand<Node, PointOffset>::exec(node.operand)};
+    }
+};
+
+template <typename Node, typename Plan, typename OldOffset, typename PointOffset>
+struct expand<AsymExpr<Node, Plan, OldOffset>, PointOffset> {
+    using result = AsymExpr<typename expand<Node, PointOffset>::result, Plan, PointOffset>;
+    static result exec(const AsymExpr<Node, Plan, OldOffset>& node) {
+        return {expand<Node, PointOffset>::exec(node.operand)};
+    }
+};
+
 template <int Numerator, int Denominator = 1, typename Node, typename... Indices>
 auto scale_field(const IndexedExpr<Node, Indices...>& field) {
     using node = ScaleExpr<Node, typename std::ratio<Numerator, Denominator>::type, typename Node::point_offset>;
@@ -591,4 +644,19 @@ auto inverse_field(const IndexedExpr<Node, First, Second>& field) {
     static_assert(is_same_variance<First, Second>::value, "metric inverse requires matching index variance");
     using node = InverseExpr<Node, typename Node::point_offset>;
     return IndexedExpr<node, typename opposite<First>::result, typename opposite<Second>::result>{node{field.node}};
+}
+
+// A projection stays one mathematical node; selected axes form its positional plan.
+template <std::size_t... Axes, typename Node, typename... Indices>
+auto sym(const IndexedExpr<Node, Indices...>& field) {
+    using analysis = sym_analysis<type_list<Indices...>, Axes...>;
+    using node = SymExpr<Node, typename analysis::plan, typename Node::point_offset>;
+    return IndexedExpr<node, Indices...>{node{field.node}};
+}
+
+template <std::size_t... Axes, typename Node, typename... Indices>
+auto asym(const IndexedExpr<Node, Indices...>& field) {
+    using analysis = asym_analysis<type_list<Indices...>, Axes...>;
+    using node = AsymExpr<Node, typename analysis::plan, typename Node::point_offset>;
+    return IndexedExpr<node, Indices...>{node{field.node}};
 }

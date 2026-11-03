@@ -10,7 +10,7 @@
 - `up<Letter>` / `dn<Letter>`：在类型层表示上、下指标；内置 `mu`、`nu`、`rho`、`sigma` 等指标字母。
 - 张量乘法：同名且一上一下的指标自动缩并；同变异性缩并会触发编译期错误。
 - 加减法、数乘、指标改名（`rename`）和显式迹（`trace`）。加减法允许指标排列不同，但要求指标集合一致。
-- 指定指标位置的对称化 `symm_orbit` 与反对称化 `asymm_orbit`。
+- 指定零起始轴号的归一化对称化 `sym<...>`、反对称化 `asym<...>`，支持 Tensor 与类型化表达式；原有按指标类型选择的 `symm_orbit`、`asymm_orbit` 继续可用。
 - `Field` 包装器，用于把坐标到张量的映射组合成场表达式。
 - `make_field<&function>()`：以具名函数作为类型化叶子，用 `*` 构造缩并表达式递归树。
 - 数值偏导 `partial`：编译期选择二、四、六、八阶中心差分，默认八阶；数学类型保留未展开的偏导节点，数值求值沿用采样执行。`partial_up` 使用逆度规将导数指标抬升。
@@ -174,6 +174,38 @@ auto shifted_result = shifted_expression.eval(x, 0.01);
 
 这一接口支持场之间的 `+`、`-`、`*`、指标改名、取迹、度规求逆、偏导和求值。`scale_field<1, 2>(expr)` 将有理系数编码为 `std::ratio<1, 2>`，避免 C++17 浮点模板参数的限制。加法的数学节点使用原有 `addition_analysis` 生成的轴置换计划；`contraction_and_arithmetic.hpp` 中的 Tensor 加法保持原实现。原有 callable `Field` 接口继续可用，两种场接口暂不混合组合。
 
+### 对称化与反对称化
+
+`sym<Axes...>(A)` 和 `asym<Axes...>(A)` 按零起始的存储轴位置选择指标，未选中的轴保持固定。选择的指标须至少两个、互不重复、位于输入范围内，并且上下位置一致。结果的指标字母、轴顺序和阶数不变；两者都使用归一化投影，即全排列求和后除以 `k!`，反对称化额外乘以排列符号。
+
+```cpp
+// A 可以是 Tensor，也可以是 make_field<&function>() 得到的表达式。
+auto symmetric = sym<0, 2>(A);
+auto alternating = asym<1, 2>(A);
+auto nested = sym<0, 2>(asym<1, 2>(A)); // 先反对称，再对称。
+
+// 十阶输入上选择六个对称轴和三个反对称轴，也只增加两个数学节点。
+auto projected = sym<1, 2, 4, 5, 7, 8>(asym<4, 5, 6>(A10));
+std::cout << projected.formula() << '\n';
+```
+
+例如最后一式的内部类型形如 `SymExpr<AsymExpr<Leaf, asym_plan<10, 4, 5, 6>>, sym_plan<10, 1, 2, 4, 5, 7, 8>>`，不会把各排列展开成加法子树。每个节点的 `children` 只包含一个操作数，位置 plan 不包含指标字母；`rename_field` 保留内部类型，`expand_at` 将 offset 继续传到叶子，也可以在任意一层组合偏导和其他运算。
+
+上述十阶例子的两组轴共同包含 `4,5`，因此这两个完整投影的复合在数学上为零。这里仍忠实保留两个操作节点。一般交叠的对称、反对称投影需要保留调用顺序，不能假定交换。
+
+与此前运算一样，入口自行生成 plan，不需要手动准备初始列表：
+
+```cpp
+using Analysis = sym_analysis<type_list<dn<a>, up<b>, dn<c>>, 0, 2>;
+using Plan = Analysis::plan; // sym_plan<3, 0, 2>
+auto result = sym_components<Plan>(std::array<double, 64>{});
+
+using Alternating = asym_analysis<type_list<dn<a>, dn<b>, dn<c>>, 0, 2>;
+auto other = asym_components<Alternating::plan>(std::array<double, 64>{});
+```
+
+计划、指标分析和数组执行都位于原有 `symm_asymm.hpp`，数学节点和表达式入口位于 `tensor_expression.hpp`。执行沿用轨道归并：累加到排序后的代表，归一化后广播。每层只求值一次操作数，运行时不枚举 `k!` 个排列；四维中反对称五个或更多轴直接得到零分量。代表槽位、排列符号和归一化因子均由 plan 在编译期预计算，再由 `if constexpr` 和固定大小的参数包生成固定源/目标槽位的数值操作。浮点类型的归一化权重也在编译期计算，求值时乘以常数。运行时不再查映射表、拆下标、排序或判断排列符号，只执行结果初始化、固定位置的加减、归一化和广播。编译期计算按块进行、块遍历采用平衡递归，避免旧实现每个分量增加一层模板递归；只构造或查看数学类型时不会生成这些执行步骤。实际指令中的内联、向量化和临时数组消除仍由编译优化决定。
+
 ### 查看 K 的数学类型
 
 `IndexedExpr::formula_type` 就是完整的数学表达式类型。`expr.formula()` 直接返回编译器的 `__PRETTY_FUNCTION__` 或 `__FUNCSIG__`；不会调用函数、求值或展开偏导采样，也没有额外的公式打印器。
@@ -271,7 +303,7 @@ python tests/run_tests.py --compiler clang++
 - `contraction_executor.hpp`：仅依据位置计划执行数组的缩并和取迹。
 - `tensor_expression.hpp`：数学表达式节点、编译器类型查看接口、偏导采样执行和 offset 传递。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
-- `symm_asymm.hpp`：对称化与反对称化。
+- `symm_asymm.hpp`：对称化、反对称化的位置计划、指标分析、数组执行与 Tensor 入口。
 - `field_wrapper.hpp`：callable 张量场封装。
 - `num_deriv.hpp`：编译期差分策略、步长检查和 callable 数值偏导接口。
 - `main.cpp`：Schwarzschild/Kretschmann 端到端示例。

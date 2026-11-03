@@ -23,7 +23,7 @@ def main():
     suffix = ".exe" if os.name == "nt" else ""
 
     for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp",
-                          "tests/test_expression.cpp", "examples/metric_expression.cpp",
+                          "tests/test_expression.cpp", "tests/test_symmetry.cpp", "examples/metric_expression.cpp",
                           "examples/kretschmann_formula.cpp", "examples/kretschmann_compare.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
         # The comparison instantiates the unshared sampled K tree; avoid expensive inlining in this diagnostic.
@@ -86,6 +86,22 @@ def main():
             "Tensor<double, up<mu>> sample(const coord<nu>&); "
             "auto derivative = partial_field<mu>(make_field<&sample>());",
             "Tensor indices must not repeat"),
+        "symmetry too few axes": (
+            "sym<0>(Tensor<double, dn<a>, dn<b>>{});", "symmetry requires at least two axes"),
+        "symmetry repeated axis": (
+            "asym<0, 0>(Tensor<double, dn<a>, dn<b>>{});", "symmetry axes must not repeat"),
+        "symmetry axis out of range": (
+            "sym<0, 2>(Tensor<double, dn<a>, dn<b>>{});", "symmetry axis is out of range"),
+        "symmetry mixed variance": (
+            "sym<0, 1>(Tensor<double, up<a>, dn<b>>{});", "symmetry axes must have the same variance"),
+        "antisymmetry mixed variance": (
+            "asym<0, 1>(Tensor<double, up<a>, dn<b>>{});", "symmetry axes must have the same variance"),
+        "symmetry shape mismatch": (
+            "sym_components<sym_plan<2, 0, 1>>(std::array<double, 4>{});",
+            "input component count does not match symmetry plan"),
+        "expression symmetry mixed variance": (
+            "Tensor<double, up<a>, dn<b>> sample(const coord<mu>&); "
+            "auto result = asym<0, 1>(make_field<&sample>());", "symmetry axes must have the same variance"),
     }
     for name, (body, diagnostic) in invalid_plans.items():
         source = '#include "field_wrapper.hpp"\nint main() { ' + body + ' }\n'
