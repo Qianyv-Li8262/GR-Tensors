@@ -52,9 +52,9 @@ DEFINE_TENSOR_FIELD2(g_inverse, schwarzschild_inverse_metric);
 //                       (d_Mu g_{Kappa Nu} + d_Nu g_{Kappa Mu} - d_Kappa g_{Mu Nu}).
 template <typename Rho, typename Mu, typename Nu, typename CoordinateLetter>
 auto christoffel(const coord<CoordinateLetter>& x, double h) {
-    const auto derivative_mu = partial<Mu>(g<dn<kappa>, dn<Nu>>, x, h, DiffScheme::Central8);
-    const auto derivative_nu = partial<Nu>(g<dn<kappa>, dn<Mu>>, x, h, DiffScheme::Central8);
-    const auto derivative_kappa = partial<kappa>(g<dn<Mu>, dn<Nu>>, x, h, DiffScheme::Central8);
+    const auto derivative_mu = partial<Mu, DiffScheme::Central8>(g<dn<kappa>, dn<Nu>>, x, h);
+    const auto derivative_nu = partial<Nu, DiffScheme::Central8>(g<dn<kappa>, dn<Mu>>, x, h);
+    const auto derivative_kappa = partial<kappa, DiffScheme::Central8>(g<dn<Mu>, dn<Nu>>, x, h);
 
     const auto inverse = g_inverse<up<Rho>, up<kappa>>.eval(x);
     return 0.5 * (inverse * (derivative_mu + derivative_nu - derivative_kappa));
@@ -74,9 +74,9 @@ auto christoffel_field(double h) {
 template <typename Rho, typename Sigma, typename Mu, typename Nu, typename CoordinateLetter>
 auto riemann(const coord<CoordinateLetter>& x, double connection_step, double curvature_step) {
     const auto derivative_mu =
-        partial<Mu>(christoffel_field<Rho, Nu, Sigma>(connection_step), x, curvature_step, DiffScheme::Central8);
+        partial<Mu, DiffScheme::Central8>(christoffel_field<Rho, Nu, Sigma>(connection_step), x, curvature_step);
     const auto derivative_nu =
-        partial<Nu>(christoffel_field<Rho, Mu, Sigma>(connection_step), x, curvature_step, DiffScheme::Central8);
+        partial<Nu, DiffScheme::Central8>(christoffel_field<Rho, Mu, Sigma>(connection_step), x, curvature_step);
 
     const auto quadratic_mu_nu =
         christoffel<Rho, Mu, lambda>(x, connection_step) * christoffel<lambda, Nu, Sigma>(x, connection_step);

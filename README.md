@@ -13,7 +13,7 @@
 - 指定指标位置的对称化 `symm_orbit` 与反对称化 `asymm_orbit`。
 - `Field` 包装器，用于把坐标到张量的映射组合成场表达式。
 - `make_field<&function>()`：以具名函数作为类型化叶子，用 `*` 构造缩并表达式递归树。
-- 数值偏导 `partial`：支持二、四、六、八阶中心差分；默认八阶。`partial_up` 使用逆度规将导数指标抬升。
+- 数值偏导 `partial`：编译期选择二、四、六、八阶中心差分，默认八阶；类型化表达式的偏导直接展开成带 offset 的采样子树。`partial_up` 使用逆度规将导数指标抬升。
 
 `diff_forms.hpp` 目前只是占位头文件，尚未提供微分形式运算。
 
@@ -142,7 +142,7 @@ x(2) = 1.1;
 auto result = expression.eval(x); // 数值计算在这里发生。
 ```
 
-外层 `IndexedExpr<Node, Indices...>` 负责指标字母；内层 `ContractExpr<L, R, Plan>` 只包含左右子树和轴对计划。节点通过 `left_type`、`right_type`、`children`、`Plan`、`scalar_type`、`rank` 暴露元数据。`rename_field` 保持存储轴顺序与上下指标位置，只换外层字母，内层节点类型不变。因此不同字母生成相同轴对计划时，对应计算子树可以拥有相同类型。
+外层 `IndexedExpr<Node, Indices...>` 负责指标字母；内层 `ContractExpr<L, R, Plan, PointOffset>` 包含左右子树、轴对计划和采样位置。节点通过 `left_type`、`right_type`、`children`、`Plan`、`scalar_type`、`rank`、`point_offset` 暴露元数据。`rename_field` 保持存储轴顺序、上下指标位置和 offset，只换外层字母，内层节点类型不变。因此不同字母生成相同轴对计划和 offset 时，对应计算子树可以拥有相同类型。
 
 树按 C++ 的括号和左结合规则保留原始结构；例如上面的四项连乘为：
 
@@ -155,7 +155,48 @@ using Tree = ContractExpr<ContractExpr<ContractExpr<G, I, P>, G, P>, I, P>;
 
 空 pair 包也通过同一节点表示外积；零阶张量场与其他张量场的乘法也是缩并节点。完全缩并得到零阶 `Tensor`，使用 `result()` 取标量。具名函数本身是不可展开的叶子，`eval` 从根递归计算子节点，相同子树出现两次就计算两次。节点按值保存子节点，表达式可安全保存由临时表达式构成的子树。
 
-这一接口目前支持场之间的 `*`、指标改名和求值；加减法、直接数值常量的乘法及求导尚未编码为树节点。原有 `make_field(callable)`、`Tensor * Tensor` 接口继续使用原来的行为；两种场接口暂不混合组合。
+`offset<O0, O1, O2, O3>` 是四个编译期 `int`，省略时 `offset<>` 等同于 `offset<0, 0, 0, 0>`。`FieldExpr<Function, PointOffset>` 和 `ContractExpr<L, R, Plan, PointOffset>` 的位置参数均默认为零；外层 `IndexedExpr::point_offset` 直接取自内部节点。offset 不增加运行时数据成员。
+
+offset 的四个值表示相对同一个根坐标 `x` 的整数步数。求值时传入公共步长 `h`（默认 `1e-2`），每个叶子在 `sample(axis) = x(axis) + h * offset[axis]` 处调用函数。普通运算节点传递原始 `x` 和 `h`，因此嵌套多层也只在叶子平移一次。
+
+```cpp
+// 直接创建带位置的叶子。
+auto shifted_metric = make_field<&metric, offset<1, -2, 0, 0>>();
+
+// 也可以从根向下，在指定位置直接生成整棵树的类型与对象。
+using O = offset<1, -2, 0, 0>;
+using ShiftedTree = typename expand<decltype(expression)::node_type, O>::result;
+auto shifted_expression = expand_at<O>(expression);
+auto shifted_result = shifted_expression.eval(x, 0.01);
+```
+
+`expand<Node, O>::result` 由根向下确定节点位置：普通运算传递相同位置，偏导分支叠加各自的差分偏移。`expand_at<O>(expression)` 同时创建对应对象，保留指标和轴对计划，建树时不调用函数。`O` 是根节点相对 `x` 的绝对中心位置，重复展开会替换中心并保留各差分分支的相对偏移，`expand_at<>(expression)` 恢复零中心。普通缩并要求左右操作数与父节点具有相同 offset；不同采样位置会产生不同节点类型。
+
+这一接口目前支持场之间的 `*`、指标改名、偏导和求值；一般加减法及直接数值常量的乘法尚未编码为树节点。原有 `make_field(callable)`、`Tensor * Tensor` 接口继续使用原来的行为；两种场接口暂不混合组合。
+
+### 编译期偏导展开
+
+包含 `num_deriv.hpp` 或 `tensors_all.hpp` 后，将差分策略写入模板参数：
+
+```cpp
+// 建树时不求值。每个方向生成 8 个 expression 的采样子树，共 32 个。
+auto derivative = partial_field<rho, DiffScheme::Central8>(expression);
+auto values = derivative.eval(x, 0.01);
+
+// 嵌套偏导直接继续展开；结果最前面依次是 sigma、rho 两根导数轴。
+auto second = partial_field<sigma, DiffScheme::Central2>(derivative);
+auto second_values = second.eval(x, 0.01);
+
+// partial(expr) 也返回树；带坐标的形式直接求值。
+auto same_tree = partial<rho, DiffScheme::Central8>(expression);
+auto same_values = partial<rho, DiffScheme::Central8>(expression, x, 0.01);
+```
+
+`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。`PartialExpr` 包含四个方向的 `StencilSumExpr`；每个加权和节点通过 `children` 暴露该方向所有带 offset 的原表达式子树，按固定权重求和后除以 `h`。原表达式如果是缩并，每个采样分支都会包含完整的缩并子树。
+
+嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。运行时仍分别执行各采样路径，尚未做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
+
+原有 callable `Field` 的数值接口也改为编译期策略：`partial<mu, DiffScheme::Central4>(field, x, h)`、`partial_field<mu, DiffScheme::Central4>(field, h)`，以及 `partial_up<mu, nu, DiffScheme::Central4>(field, inverse, x, h)`。这一路的函数体仍是叶子，结果类型由未求值的表达式推导，不再额外调用一次中心点函数。运行时 `switch` 和接收 `DiffScheme` 实参的重载已移除。
 
 [`examples/metric_expression.cpp`](examples/metric_expression.cpp) 提供可直接运行的 Schwarzschild 四项连乘，并打印结果类型、完整展开的树类型和外层表达式类型：
 
@@ -176,7 +217,7 @@ python tests/run_tests.py
 python tests/run_tests.py --compiler clang++
 ```
 
-检查包含矩阵乘法、交错多轴缩并、含 `contractpair<3, 3>` 的四阶张量、完全缩并、外积及零阶输入的独立分量循环对照；另有仅依赖执行层的数组测试和 Schwarzschild 曲率示例。表达式测试检查编译期树类型、改名后的子树类型相同、建树不求值、非对角度规连乘、外积、零阶场乘法、全缩并，以及重复子树的调用次数。非法同变异性缩并、改名改变上下位置、越界轴、左右重复轴及数组大小错误必须编译失败，并检查对应诊断。
+检查包含矩阵乘法、交错多轴缩并、含 `contractpair<3, 3>` 的四阶张量、完全缩并、外积及零阶输入的独立分量循环对照；另有仅依赖执行层的数组测试和 Schwarzschild 曲率示例。表达式测试检查编译期树类型、改名后的子树类型相同、建树不求值、非对角度规连乘、外积、零阶场乘法、全缩并，以及重复子树的调用次数。offset 测试覆盖四维正负偏移、默认零位置、向叶子传播、整树重新展开、改名保留位置和多层树只平移一次。偏导测试覆盖四种策略的多项式解析导数、完整采样坐标与调用次数、嵌套/混合偏导、对含偏导的乘积继续求导，以及 callable 接口和导数指标抬升。非法同变异性缩并、改名改变上下位置、越界轴、左右重复轴、数组大小错误、缩并节点位置不一致、重复导数指标和运行时差分策略必须编译失败，并检查对应诊断。
 
 ## 文件导览
 
@@ -185,8 +226,9 @@ python tests/run_tests.py --compiler clang++
 - `contraction_analysis.hpp`：缩并、取迹的指标分析与位置计划生成。
 - `contraction_plan.hpp`：`contraction_plan`、`trace_plan` 及位置合法性检查；缩并保留独立的 `contractpair<L, R>`。
 - `contraction_executor.hpp`：仅依据位置计划执行数组的缩并和取迹。
-- `tensor_expression.hpp`：具名函数叶子、缩并递归树及外层指标视图。
+- `tensor_expression.hpp`：具名函数叶子、缩并递归树、外层指标视图及编译期 offset 展开。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化与反对称化。
-- `field_wrapper.hpp`、`num_deriv.hpp`：张量场封装与有限差分。
+- `field_wrapper.hpp`：callable 张量场封装。
+- `num_deriv.hpp`：编译期差分策略、偏导采样树、偏导 offset 展开与数值求值接口。
 - `main.cpp`：Schwarzschild/Kretschmann 端到端示例。

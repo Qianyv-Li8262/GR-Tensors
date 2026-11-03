@@ -88,10 +88,10 @@ auto rename_field(const Field<F>& field) {
 }
 
 // partial 返回 Field
-template <typename DerivLetter, typename F>
+template <typename DerivLetter, DiffScheme Scheme = DiffScheme::Central8, typename F>
 auto partial_field(const Field<F>& field, double h = 1e-2) {
     return make_field([field, h](const auto& x) {
-        return partial<DerivLetter>(field, x, h);
+        return partial<DerivLetter, Scheme>(field, x, h);
     });
 }
 

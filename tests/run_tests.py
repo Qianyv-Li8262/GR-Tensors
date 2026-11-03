@@ -70,9 +70,22 @@ def main():
             "trace<a, c>(Tensor<double, up<a>, dn<b>>{});", "trace index letter must exist in the tensor"),
         "trace repeated letter": (
             "trace<a, a>(Tensor<double, up<a>, dn<b>>{});", "trace requires two distinct index letters"),
+        "expression offset mismatch": (
+            "Tensor<double> sample(const Tensor<double, up<mu>>&); "
+            "auto result = make_field<&sample>() * make_field<&sample, offset<1, 0, 0, 0>>();",
+            "contraction operands must share the node offset"),
+        "runtime derivative strategy": (
+            "Tensor<double> sample(const coord<mu>&); "
+            "DiffScheme scheme = DiffScheme::Central2; "
+            "auto derivative = partial_field<mu, scheme>(make_field<&sample>());",
+            "no matching function"),
+        "derivative repeated index": (
+            "Tensor<double, up<mu>> sample(const coord<nu>&); "
+            "auto derivative = partial_field<mu>(make_field<&sample>());",
+            "Tensor indices must not repeat"),
     }
     for name, (body, diagnostic) in invalid_plans.items():
-        source = '#include "contraction_and_arithmetic.hpp"\nint main() { ' + body + ' }\n'
+        source = '#include "field_wrapper.hpp"\nint main() { ' + body + ' }\n'
         built = subprocess.run(flags + ["-x", "c++", "-fsyntax-only", "-"], input=source,
                                capture_output=True, text=True)
         if built.returncode == 0 or diagnostic not in built.stdout + built.stderr:

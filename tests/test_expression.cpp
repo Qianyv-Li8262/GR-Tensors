@@ -1,14 +1,18 @@
-#include "tensor_expression.hpp"
+#include "field_wrapper.hpp"
 
 #include <algorithm>
 #include <cmath>
 #include <iostream>
 #include <type_traits>
+#include <vector>
 
 namespace {
 
 int metric_calls = 0;
 int inverse_calls = 0;
+int coordinate_calls = 0;
+int derivative_calls = 0;
+std::vector<std::array<double, 4>> derivative_samples;
 int failures = 0;
 
 // Dense, coordinate-dependent Lorentz metric: a nondiagonal test catches axis mistakes.
@@ -52,6 +56,38 @@ auto other_scalar_field(const Tensor<double, up<mu>>& x) {
     return Tensor<double>(3.0 + x(1));
 }
 
+auto coordinate_field(const Tensor<double, up<mu>>& x) {
+    ++coordinate_calls;
+    Tensor<double, up<a>> result;
+    result.data = x.data;
+    return result;
+}
+
+template <int Power>
+auto monomial_field(const coord<mu>& x) {
+    ++derivative_calls;
+    derivative_samples.push_back(x.data);
+    Tensor<double, up<a>> result;
+    for (int axis = 0; axis < 4; ++axis) {
+        result(axis) = std::pow(x(axis), Power);
+    }
+    return result;
+}
+
+auto polynomial_field(const coord<mu>& x) {
+    ++derivative_calls;
+    derivative_samples.push_back(x.data);
+    return Tensor<double>(std::pow(x(0), 4) + x(0) * x(1) * x(2));
+}
+
+auto identity_inverse(const coord<mu>&) {
+    Tensor<double, up<a>, up<b>> result;
+    for (int axis = 0; axis < 4; ++axis) {
+        result(axis, axis) = 1.0;
+    }
+    return result;
+}
+
 static_assert(std::is_same_v<decltype(&scalar_field), decltype(&other_scalar_field)>);
 static_assert(!std::is_same_v<FieldExpr<&scalar_field>, FieldExpr<&other_scalar_field>>);
 
@@ -64,6 +100,194 @@ void check(bool condition, const char* message) {
 
 bool close(double actual, double expected) {
     return std::isfinite(actual) && std::abs(actual - expected) < 1e-11 * std::max(1.0, std::abs(expected));
+}
+
+void check_offsets() {
+    using O = offset<1, -2, 3, -4>;
+    using S = FieldExpr<&scalar_field, O>;
+    using V = FieldExpr<&coordinate_field, O>;
+    using P00 = contraction_plan<0, 0>;
+    using P01 = contraction_plan<0, 1>;
+
+    const auto scalar = make_field<&scalar_field>();
+    const auto original = scalar * scalar * make_field<&coordinate_field>();
+    const auto shifted = expand_at<O>(original);
+    const auto renamed = rename_field<up<b>>(shifted);
+    const auto direct = make_field<&scalar_field, O>() * make_field<&scalar_field, O>() *
+                        make_field<&coordinate_field, O>();
+    const auto reset = expand_at<>(shifted);
+    const auto relocated = expand_at<offset<-1, 0, 0, 2>>(shifted);
+
+    static_assert(std::is_same_v<offset<>, offset<0, 0, 0, 0>>);
+    static_assert(std::is_same_v<typename decltype(original)::point_offset, offset<>>);
+    static_assert(std::is_same_v<typename decltype(shifted)::point_offset, O>);
+    static_assert(!std::is_same_v<typename decltype(original)::node_type, typename decltype(shifted)::node_type>);
+    static_assert(std::is_same_v<typename decltype(shifted)::node_type,
+                                 ContractExpr<ContractExpr<S, S, P00, O>, V, P01, O>>);
+    static_assert(std::is_same_v<typename decltype(direct)::node_type, typename decltype(shifted)::node_type>);
+    static_assert(std::is_same_v<typename decltype(renamed)::node_type, typename decltype(shifted)::node_type>);
+    static_assert(std::is_same_v<typename decltype(reset)::node_type, typename decltype(original)::node_type>);
+    check(coordinate_calls == 0, "building and expanding offset trees must not evaluate leaves");
+
+    Tensor<double, up<mu>> x;
+    x.data = {1.0, 2.0, 3.0, 4.0};
+    for (double h : {0.25, 0.5}) {
+        const auto shifted_value = shifted.eval(x, h);
+        const auto direct_value = direct.eval(x, h);
+        const auto renamed_value = renamed(x, h);
+        const auto reset_value = reset.eval(x, h);
+        const auto relocated_value = relocated.eval(x, h);
+        for (std::size_t axis = 0; axis < 4; ++axis) {
+            const double sample = x(axis) + h * O::values[axis];
+            const double factor = 2.0 + x(1) - 2 * h;
+            const double expected = factor * factor * sample;
+            check(close(shifted_value(axis), expected), "nested tree must shift each leaf exactly once");
+            check(close(direct_value(axis), expected), "factory offsets must propagate through multiplication");
+            check(close(renamed_value(axis), expected), "rename must preserve offsets");
+            check(close(reset_value(axis), 16.0 * x(axis)), "zero offset must restore root sampling");
+            const int new_offset[] = {-1, 0, 0, 2};
+            check(close(relocated_value(axis), 16.0 * (x(axis) + h * new_offset[axis])),
+                  "expand_at must replace the absolute offset rather than add it again");
+        }
+    }
+    const auto default_step = shifted.eval(x);
+    for (std::size_t axis = 0; axis < 4; ++axis) {
+        check(close(default_step(axis), (4.0 - 0.02) * (4.0 - 0.02) * (x(axis) + 0.01 * O::values[axis])),
+              "offset evaluation must support the default step");
+        check(x(axis) == axis + 1.0, "leaf sampling must not modify the root coordinate");
+    }
+}
+
+template <DiffScheme Scheme, int Power, int Points>
+void check_derivative_scheme() {
+    derivative_calls = 0;
+    derivative_samples.clear();
+    const auto field = make_field<&monomial_field<Power>>();
+    const auto derivative = partial_field<mu, Scheme>(field);
+    using tree = typename decltype(derivative)::node_type;
+    using direction = typename nth_type<0, typename tree::children>::result;
+    static_assert(list_size<typename tree::children>::value == 4);
+    static_assert(list_size<typename direction::children>::value == Points);
+    static_assert(std::is_same_v<typename decltype(derivative)::result_type, Tensor<double, dn<mu>, up<a>>>);
+    check(derivative_calls == 0, "building a derivative must not evaluate the source");
+
+    coord<mu> x;
+    x.data = {0.5, 0.75, 1.0, 1.25};
+    const double h = 0.125;
+    const auto value = derivative.eval(x, h);
+    check(derivative_calls == 4 * Points, "derivative must evaluate exactly the expanded sample count");
+    for (int axis = 0; axis < 4; ++axis) {
+        for (int component = 0; component < 4; ++component) {
+            const double expected = axis == component ? Power * std::pow(x(axis), Power - 1) : 0.0;
+            check(close(value(axis, component), expected), "compile-time stencil polynomial derivative mismatch");
+        }
+        for (int point = 0; point < Points; ++point) {
+            const int distance = point < Points / 2 ? point - Points / 2 : point - Points / 2 + 1;
+            auto expected = x.data;
+            expected[axis] += distance * h;
+            check(derivative_samples[axis * Points + point] == expected,
+                  "sampling subtree must use its compile-time offset from the original root");
+        }
+    }
+}
+
+void check_derivatives() {
+    check_derivative_scheme<DiffScheme::Central2, 2, 2>();
+    check_derivative_scheme<DiffScheme::Central4, 4, 4>();
+    check_derivative_scheme<DiffScheme::Central6, 6, 6>();
+    check_derivative_scheme<DiffScheme::Central8, 8, 8>();
+
+    const auto field = make_field<&polynomial_field>();
+    const auto first = partial<mu, DiffScheme::Central2>(field);
+    const auto second = partial_field<nu, DiffScheme::Central2>(first);
+    const auto shifted = expand_at<offset<1, -1, 0, 0>>(second);
+    const auto reset = expand_at<>(shifted);
+    using tree = typename decltype(second)::node_type;
+    using outer0 = typename nth_type<0, typename tree::children>::result;
+    using negative = typename nth_type<0, typename outer0::children>::result;
+    using positive = typename nth_type<1, typename outer0::children>::result;
+    using negative0 = typename nth_type<0, typename negative::children>::result;
+    using positive0 = typename nth_type<0, typename positive::children>::result;
+    using minus_plus = typename nth_type<1, typename negative0::children>::result;
+    using plus_minus = typename nth_type<0, typename positive0::children>::result;
+    using plus_plus = typename nth_type<1, typename positive0::children>::result;
+    static_assert(std::is_same_v<minus_plus, plus_minus>);
+    static_assert(std::is_same_v<typename plus_minus::point_offset, offset<>>);
+    static_assert(std::is_same_v<typename plus_plus::point_offset, offset<2, 0, 0, 0>>);
+    static_assert(std::is_same_v<typename decltype(reset)::node_type, tree>);
+
+    coord<mu> x;
+    x.data = {0.5, 0.75, 1.0, 1.25};
+    const double h = 0.125;
+    derivative_calls = 0;
+    const auto value = second.eval(x, h);
+    check(derivative_calls == 64, "nested Central2 must retain all 64 sampling paths without a center probe");
+    const auto shifted_value = shifted.eval(x, h);
+    for (int a = 0; a < 4; ++a) {
+        for (int b = 0; b < 4; ++b) {
+            auto expected_hessian = [&](double p0, double p1, double p2) {
+                if (a == 0 && b == 0) return 12 * p0 * p0 + 8 * h * h;
+                if ((a == 0 && b == 1) || (a == 1 && b == 0)) return p2;
+                if ((a == 0 && b == 2) || (a == 2 && b == 0)) return p1;
+                if ((a == 1 && b == 2) || (a == 2 && b == 1)) return p0;
+                return 0.0;
+            };
+            check(close(value(a, b), expected_hessian(x(0), x(1), x(2))),
+                  "nested differentiation must preserve composition of first-difference operators");
+            check(close(shifted_value(a, b), expected_hessian(x(0) + h, x(1) - h, x(2))),
+                  "moving a derivative tree must retain inner and outer stencil displacements");
+        }
+    }
+
+    const auto product = make_field<&scalar_field>() * make_field<&coordinate_field>();
+    const auto product_derivative = partial_field<nu, DiffScheme::Central4>(product).eval(x, h);
+    for (int a = 0; a < 4; ++a) {
+        for (int j = 0; j < 4; ++j) {
+            const double expected = (a == 1 ? x(j) : 0.0) + (a == j ? 2.0 + x(1) : 0.0);
+            check(close(product_derivative(a, j), expected), "each sampling branch must contain the full product");
+        }
+    }
+
+    const auto opaque = make_field([](const coord<mu>& point) { return polynomial_field(point); });
+    derivative_calls = 0;
+    const auto legacy_value = partial<mu, DiffScheme::Central4>(opaque, x, h);
+    check(derivative_calls == 16, "opaque callable derivative must not add a result-type probe");
+    const auto wrapped = partial_field<mu, DiffScheme::Central4>(opaque, h).eval(x);
+    const auto typed = partial<mu, DiffScheme::Central4>(field, x, h);
+    const auto shifted_typed = partial<mu, DiffScheme::Central4>(
+        expand_at<offset<1, -1, 0, 0>>(field), x, h);
+    const auto raised = partial_up<nu, mu, DiffScheme::Central4>(field, make_field<&identity_inverse>(), x, h);
+    const double expected_gradient[] = {4 * std::pow(x(0), 3) + x(1) * x(2), x(0) * x(2), x(0) * x(1), 0};
+    const double shifted_gradient[] = {4 * std::pow(x(0) + h, 3) + (x(1) - h) * x(2),
+                                       (x(0) + h) * x(2), (x(0) + h) * (x(1) - h), 0};
+    for (int axis = 0; axis < 4; ++axis) {
+        check(close(legacy_value(axis), expected_gradient[axis]), "opaque compile-time strategy mismatch");
+        check(close(wrapped(axis), expected_gradient[axis]), "Field wrapper must forward the compile-time strategy");
+        check(close(typed(axis), expected_gradient[axis]), "direct typed partial must evaluate its sampling tree");
+        check(close(shifted_typed(axis), shifted_gradient[axis]), "direct typed partial must forward h to offsets");
+        check(close(raised(axis), expected_gradient[axis]), "partial_up must forward the compile-time strategy");
+    }
+
+    // A derivative inside an ordinary operation must also expand at every outer sample.
+    const auto gradient_product = make_field<&scalar_field>() * partial_field<mu, DiffScheme::Central4>(field);
+    const auto mixed = partial_field<nu, DiffScheme::Central2>(gradient_product).eval(x, h);
+    auto analytic_gradient = [](const auto& p, int axis) {
+        if (axis == 0) return 4 * std::pow(p(0), 3) + p(1) * p(2);
+        if (axis == 1) return p(0) * p(2);
+        if (axis == 2) return p(0) * p(1);
+        return 0.0;
+    };
+    for (int a = 0; a < 4; ++a) {
+        auto plus = x;
+        auto minus = x;
+        plus(a) += h;
+        minus(a) -= h;
+        for (int b = 0; b < 4; ++b) {
+            const double expected = ((2 + plus(1)) * analytic_gradient(plus, b) -
+                                     (2 + minus(1)) * analytic_gradient(minus, b)) / (2 * h);
+            check(close(mixed(a, b), expected), "derivative of a product containing a derivative must expand recursively");
+        }
+    }
 }
 
 } // namespace
@@ -145,9 +369,11 @@ int main() {
         (void)balanced.eval(x);
         check(metric_calls == 2 && inverse_calls == 2, "tree evaluation must visit both repeated subtrees");
     }
+    check_offsets();
+    check_derivatives();
     if (failures) {
         return 1;
     }
     std::cout
-        << "expression types, lazy construction, dense metric chains, outer/scalar/full contractions passed\n";
+        << "expression types, offsets, compile-time derivative trees, metric chains and contractions passed\n";
 }
