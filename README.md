@@ -174,6 +174,23 @@ auto shifted_result = shifted_expression.eval(x, 0.01);
 
 这一接口支持场之间的 `+`、`-`、`*`、指标改名、取迹、度规求逆、偏导和求值。`scale_field<1, 2>(expr)` 将有理系数编码为 `std::ratio<1, 2>`，避免 C++17 浮点模板参数的限制。加法的数学节点使用原有 `addition_analysis` 生成的轴置换计划；`contraction_and_arithmetic.hpp` 中的 Tensor 加法保持原实现。原有 callable `Field` 接口继续可用，两种场接口暂不混合组合。
 
+### 完整轴置换
+
+`index<Axes...>` 显式给出完整的零起始轴对应关系：输出第 `k` 根轴取自输入第 `Axes[k]` 根轴。必须将输入的每根轴恰好列一次，包含保持原位的轴；缺失、重复或越界都在编译期拒绝，不会自动补齐。
+
+```cpp
+auto B = permute(A, index<1, 0>{}); // [a,b] -> [b,a]，B(j,i) = A(i,j)
+auto C = permute(A3, index<2, 0, 1>{}); // [a,b,c] -> [c,a,b]，C(k,i,j) = A3(i,j,k)
+auto D = permute<0, 2, 1>(A3); // 等价简写，仍须给全三根轴。
+auto unchanged = permute(A3, index<0, 1, 2>{}); // 恒等映射也完整写出。
+auto scalar = permute(Tensor<double>(3.0), index<>{}); // 零阶的完整映射为空。
+
+// 后端直接重排已经算出的数组，不需要重新求值计算树。
+auto reordered = permute_components<index<1, 0>>(std::array<double, 16>{});
+```
+
+`permute` 同时支持 Tensor 和类型化表达式。Tensor 的指标名称及上下位置随轴一起移动；表达式增加一个 `PermuteExpr<Node, index<...>, Offset>` 节点，保留完整计划、单个子节点以及 offset，也能继续组合偏导。`index<...>::is_identity` 在编译期识别完整恒等映射：表达式直接转交操作数的求值结果，保留公式节点但跳过分量重排。Tensor 和裸数组接口仍按值返回独立结果。一般置换将输入复制到独立输出数组，因此即使某分量的源/目标位置相同也必须写入，不能跳过造成输出未初始化；不提供原地覆盖接口。源/目标分量位置均在编译期计算，生成固定槽位的复制操作，运行时不查映射表或转换多维下标。实现位于 `permutation.hpp`，暂未修改 DAG 或加入 CSE。
+
 ### 对称化与反对称化
 
 `sym<Axes...>(A)` 和 `asym<Axes...>(A)` 按零起始的存储轴位置选择指标，未选中的轴保持固定。选择的指标须至少两个、互不重复、位于输入范围内，并且上下位置一致。结果的指标字母、轴顺序和阶数不变；两者都使用归一化投影，即全排列求和后除以 `k!`，反对称化额外乘以排列符号。
@@ -304,6 +321,7 @@ python tests/run_tests.py --compiler clang++
 - `tensor_expression.hpp`：数学表达式节点、编译器类型查看接口、偏导采样执行和 offset 传递。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化、反对称化的位置计划、指标分析、数组执行与 Tensor 入口。
+- `permutation.hpp`：完整零起始轴置换计划、固定槽位复制执行器与 Tensor 入口。
 - `field_wrapper.hpp`：callable 张量场封装。
 - `num_deriv.hpp`：编译期差分策略、步长检查和 callable 数值偏导接口。
 - `main.cpp`：Schwarzschild/Kretschmann 端到端示例。

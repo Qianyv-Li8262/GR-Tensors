@@ -23,7 +23,9 @@ def main():
     suffix = ".exe" if os.name == "nt" else ""
 
     for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp",
-                          "tests/test_expression.cpp", "tests/test_symmetry.cpp", "examples/metric_expression.cpp",
+                          "tests/test_expression.cpp", "tests/test_symmetry.cpp", "tests/test_permutation.cpp",
+                          "tests/test_expression_graph.cpp",
+                          "examples/metric_expression.cpp",
                           "examples/kretschmann_formula.cpp", "examples/kretschmann_compare.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
         # The comparison instantiates the unshared sampled K tree; avoid expensive inlining in this diagnostic.
@@ -60,6 +62,19 @@ def main():
 
     # Compile snippets from stdin so new plan checks need no extra source files.
     invalid_plans = {
+        "permutation incomplete mapping": (
+            "permute<1, 0>(Tensor<double, dn<a>, dn<b>, dn<c>>{});",
+            "permutation must specify every input axis"),
+        "permutation repeated axis": (
+            "permute<0, 0>(Tensor<double, dn<a>, dn<b>>{});", "permutation axes must not repeat"),
+        "permutation axis out of range": (
+            "permute<0, 2>(Tensor<double, dn<a>, dn<b>>{});", "permutation axis is out of range"),
+        "permutation component mismatch": (
+            "permute_components<index<1, 0>>(std::array<double, 64>{});",
+            "permutation must specify every input axis"),
+        "expression permutation incomplete mapping": (
+            "Tensor<double, dn<a>, dn<b>, dn<c>> sample(const coord<mu>&); "
+            "auto result = permute<1, 0>(make_field<&sample>());", "permutation must specify every input axis"),
         "trace axis out of range": (
             "return trace_plan<2, 0, 2>::result_size;", "trace plan axis is out of range"),
         "trace same axis": (

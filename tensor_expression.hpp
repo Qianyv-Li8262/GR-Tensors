@@ -2,6 +2,7 @@
 
 #include "contraction_and_arithmetic.hpp"
 #include "num_deriv.hpp"
+#include "permutation.hpp"
 #include "symm_asymm.hpp"
 #include <algorithm>
 #include <array>
@@ -205,6 +206,27 @@ struct AsymExpr {
     template <typename Coordinate>
     auto eval_components(const Coordinate& x, double h = 1e-2) const {
         return asym_components<Plan>(operand.eval_components(x, h));
+    }
+};
+
+template <typename Node, typename Permutation, typename PointOffset = offset<>>
+struct PermuteExpr {
+    using Plan = Permutation;
+    using point_offset = PointOffset;
+    using scalar_type = typename Node::scalar_type;
+    using children = type_list<Node>;
+    static constexpr std::size_t rank = Node::rank;
+    static_assert(rank == Plan::rank, "permutation must specify every input axis");
+    static_assert(std::is_same_v<typename Node::point_offset, point_offset>, "permutation offsets must match");
+    Node operand;
+
+    template <typename Coordinate>
+    auto eval_components(const Coordinate& x, double h = 1e-2) const {
+        if constexpr (Plan::is_identity) {
+            return operand.eval_components(x, h);
+        } else {
+            return permute_components<Plan>(operand.eval_components(x, h));
+        }
     }
 };
 
@@ -608,6 +630,14 @@ struct expand<AsymExpr<Node, Plan, OldOffset>, PointOffset> {
     }
 };
 
+template <typename Node, typename Plan, typename OldOffset, typename PointOffset>
+struct expand<PermuteExpr<Node, Plan, OldOffset>, PointOffset> {
+    using result = PermuteExpr<typename expand<Node, PointOffset>::result, Plan, PointOffset>;
+    static result exec(const PermuteExpr<Node, Plan, OldOffset>& node) {
+        return {expand<Node, PointOffset>::exec(node.operand)};
+    }
+};
+
 template <int Numerator, int Denominator = 1, typename Node, typename... Indices>
 auto scale_field(const IndexedExpr<Node, Indices...>& field) {
     using node = ScaleExpr<Node, typename std::ratio<Numerator, Denominator>::type, typename Node::point_offset>;
@@ -659,4 +689,17 @@ auto asym(const IndexedExpr<Node, Indices...>& field) {
     using analysis = asym_analysis<type_list<Indices...>, Axes...>;
     using node = AsymExpr<Node, typename analysis::plan, typename Node::point_offset>;
     return IndexedExpr<node, Indices...>{node{field.node}};
+}
+
+template <typename Node, typename... Indices, std::size_t... Axes>
+auto permute(const IndexedExpr<Node, Indices...>& field, index<Axes...>) {
+    using plan = index<Axes...>;
+    using node = PermuteExpr<Node, plan, typename Node::point_offset>;
+    static_assert(sizeof...(Axes) == sizeof...(Indices), "permutation must specify every input axis");
+    return IndexedExpr<node, typename nth_type<Axes, type_list<Indices...>>::result...>{node{field.node}};
+}
+
+template <std::size_t... Axes, typename Node, typename... Indices>
+auto permute(const IndexedExpr<Node, Indices...>& field) {
+    return permute(field, index<Axes...>{});
 }
