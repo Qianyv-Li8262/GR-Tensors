@@ -25,6 +25,7 @@ def main():
     for relative_path in ["tests/test_contraction.cpp", "tests/test_positional_contraction.cpp",
                           "tests/test_expression.cpp", "tests/test_symmetry.cpp", "tests/test_permutation.cpp",
                           "tests/test_expression_graph.cpp",
+                          "tests/test_graph_operations.cpp",
                           "examples/metric_expression.cpp",
                           "examples/kretschmann_formula.cpp", "examples/kretschmann_compare.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
@@ -62,6 +63,13 @@ def main():
 
     # Compile snippets from stdin so new plan checks need no extra source files.
     invalid_plans = {
+        "DAG unsupported node": (
+            "struct Other { using scalar_type = double; using point_offset = offset<>; enum { rank = 0 }; }; "
+            "auto result = compile(IndexedExpr<Other>{});",
+            "unsupported expression node in DAG compile"),
+        "DAG empty hash table": (
+            "Tensor<double> sample(const coord<mu>&); auto result = compile<0>(make_field<&sample>());",
+            "DAG hash table requires at least one bucket"),
         "permutation incomplete mapping": (
             "permute<1, 0>(Tensor<double, dn<a>, dn<b>, dn<c>>{});",
             "permutation must specify every input axis"),
@@ -119,7 +127,7 @@ def main():
             "auto result = asym<0, 1>(make_field<&sample>());", "symmetry axes must have the same variance"),
     }
     for name, (body, diagnostic) in invalid_plans.items():
-        source = '#include "field_wrapper.hpp"\nint main() { ' + body + ' }\n'
+        source = '#include "field_wrapper.hpp"\n#include "expression_graph.hpp"\nint main() { ' + body + ' }\n'
         built = subprocess.run(flags + ["-x", "c++", "-fsyntax-only", "-"], input=source,
                                capture_output=True, text=True)
         if built.returncode == 0 or diagnostic not in built.stdout + built.stderr:

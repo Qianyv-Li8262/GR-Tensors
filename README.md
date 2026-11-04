@@ -114,7 +114,7 @@ auto result = trace_components<Analysis::plan>(input); // std::array<double, 16>
 
 原来的 `trace<a, d>(tensor)` 接口在指标层生成上述计划再调用执行层；二阶张量取迹返回零阶 `Tensor`。缺失字母、相同字母或同为上/下指标会在分析层报错；直接指定位置时，执行前检查轴越界、两轴相同和数组大小不匹配。
 
-这层分离已经用于下面的缩并表达式树；当前尚未实现表达式 DAG 或场求值缓存。
+这层分离用于下面的缩并表达式树，也用于 `compile` 生成的表达式 DAG 与单次求值缓存。
 
 ## 类型化的缩并表达式树
 
@@ -189,7 +189,7 @@ auto scalar = permute(Tensor<double>(3.0), index<>{}); // 零阶的完整映射�
 auto reordered = permute_components<index<1, 0>>(std::array<double, 16>{});
 ```
 
-`permute` 同时支持 Tensor 和类型化表达式。Tensor 的指标名称及上下位置随轴一起移动；表达式增加一个 `PermuteExpr<Node, index<...>, Offset>` 节点，保留完整计划、单个子节点以及 offset，也能继续组合偏导。`index<...>::is_identity` 在编译期识别完整恒等映射：表达式直接转交操作数的求值结果，保留公式节点但跳过分量重排。Tensor 和裸数组接口仍按值返回独立结果。一般置换将输入复制到独立输出数组，因此即使某分量的源/目标位置相同也必须写入，不能跳过造成输出未初始化；不提供原地覆盖接口。源/目标分量位置均在编译期计算，生成固定槽位的复制操作，运行时不查映射表或转换多维下标。实现位于 `permutation.hpp`，暂未修改 DAG 或加入 CSE。
+`permute` 同时支持 Tensor 和类型化表达式。Tensor 的指标名称及上下位置随轴一起移动；表达式增加一个 `PermuteExpr<Node, index<...>, Offset>` 节点，保留完整计划、单个子节点以及 offset，也能继续组合偏导。`index<...>::is_identity` 在编译期识别完整恒等映射：表达式直接转交操作数的求值结果，保留公式节点但跳过分量重排。Tensor 和裸数组接口仍按值返回独立结果。一般置换将输入复制到独立输出数组，因此即使某分量的源/目标位置相同也必须写入，不能跳过造成输出未初始化；不提供原地覆盖接口。源/目标分量位置均在编译期计算，生成固定槽位的复制操作，运行时不查映射表或转换多维下标。数组复制实现位于 `permutation.hpp`；DAG 执行路径将显式置换保留为轴映射元数据，见下文。
 
 ### 对称化与反对称化
 
@@ -256,7 +256,7 @@ clang++ -std=c++17 -O0 -I . examples/kretschmann_compare.cpp -o kretschmann_comp
 ./kretschmann_compare
 ```
 
-在三组坐标、两种步长的六组检查中，K 相对解析参考的最大误差约为 `3.56e-10`。这是独立解析参考与现有有限差分执行的数值验证；数学类型里的偏导仍未展开，CSE 也尚未实现。
+在三组坐标、两种步长的六组检查中，K 相对解析参考的最大误差约为 `3.56e-10`。这是独立解析参考与原有有限差分执行的数值验证；数学类型里的偏导仍未展开，该示例尚未切换到 DAG 执行路径。
 
 ### Bach 张量的四层偏导示例
 
@@ -284,9 +284,9 @@ auto same_tree = partial<rho, DiffScheme::Central8>(expression);
 auto same_values = partial<rho, DiffScheme::Central8>(expression, x, 0.01);
 ```
 
-`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。数学节点 `PartialExpr` 与执行节点 `SampledPartialExpr` 分离；只有调用 `.eval()` 时才使用原有的四方向 `StencilSumExpr` 采样执行。加权和节点按固定权重求和后除以 `h`，本次未加入 CSE。
+`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。数学节点 `PartialExpr` 与执行节点 `SampledPartialExpr` 分离；数学树直接调用 `.eval()` 时使用原有的四方向 `StencilSumExpr` 采样执行，加权求和后除以 `h`，这条直接执行路径不做 CSE。另一条 `compile` 路径在建图时降级偏导，并复用相同位置的采样，见下文。
 
-嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。运行时仍分别执行各采样路径，尚未做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
+嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。数学树的直接执行器仍分别执行各采样路径，不做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
 
 原有 callable `Field` 的数值接口也改为编译期策略：`partial<mu, DiffScheme::Central4>(field, x, h)`、`partial_field<mu, DiffScheme::Central4>(field, h)`，以及 `partial_up<mu, nu, DiffScheme::Central4>(field, inverse, x, h)`。这一路的函数体仍是叶子，结果类型由未求值的表达式推导，不再额外调用一次中心点函数。运行时 `switch` 和接收 `DiffScheme` 实参的重载已移除。
 
@@ -298,6 +298,59 @@ clang++ -std=c++17 -O2 -I . examples/metric_expression.cpp -o metric_expression
 ```
 
 示例的类型输出使用 Clang/GCC 的 `__PRETTY_FUNCTION__` 或 MSVC 的 `__FUNCSIG__` 扩展，仅用于展示；缩并表达式本身不依赖类型字符串。
+
+### 编译期表达式 DAG
+
+`expression_graph.hpp` 提供第二条执行路径，支持场叶子、缩并（含外积和标量乘法）、有理数缩放、加减、取迹、求逆、对称/反对称投影、置换以及四种中心差分偏导。原有数学树与递归执行器保持各自的接口：
+
+```cpp
+#include "expression_graph.hpp"
+
+auto F = make_field<&f>(); // f、g 返回二阶张量，指标为 up<a>, dn<b>
+auto G = make_field<&g>();
+auto S = F * rename_field<up<b>, dn<a>>(G); // 完全缩并为标量场
+auto A = S * S;
+
+auto graph = compile(A);
+auto direct = A.eval(x, h);
+auto shared = graph.eval(x, h); // 返回与 direct 相同的 Tensor 类型
+
+static_assert(decltype(graph)::node_count == 4);
+static_assert(decltype(graph)::cache_count == 1);
+static_assert(decltype(graph)::use_count<2> == 2);
+```
+
+`compile` 解开 `IndexedExpr`，在递归前先查询整棵当前子树，未命中才后序编译孩子，生成 `ExprGraph<Output, DAGNode<Id, Operation, Inputs...>...>`。输出描述保留原来的指标及根节点的轴映射；孩子先于父节点分配 ID。图类型包含全部操作、位置计划和依赖，图对象不保留原表达式或指向它的指针，建图不会调用场函数。
+
+建图使用不可变的编译期 `TypeHashTable`：类型签名的 FNV-1a 哈希选择桶，桶内通过完整类型相等判断解决碰撞。表内有两类键：`SourceKey<规范子树类型>` 映射到完整 `NodeRef<Id, Layout>`；`NodeKey<操作, 孩子ID...>` 映射到节点 ID。前者在递归之前查询，不依赖孩子 ID；后者在递归之后查询。`compile<1>(A)` 可强制所有键进入同一桶，仍得到相同的图类型。哈希与 ID 只用于当前编译和图内部，不作为跨编译器的持久标识。
+
+入口按左右原始子树的编译器类型签名（`__PRETTY_FUNCTION__` / `__FUNCSIG__`）字典序选择方向，交换时同步转置缩并轴对，并记录自由轴顺序变化。它只规范化当前一层，不递归规范化孩子；命中后通过独立的模板特化直接返回已有引用，不实例化孩子的编译路径。未命中则继续编译，结束时登记规范子树到图存储的轴映射。原样重复及当前层左右相反的子树均可提前命中；更深层的等价变形仍由后序查重处理。长类型签名的生成和比较仍有编译成本。
+
+递归后的缩并再把操作类型和孩子 ID 组成键查重，此时孩子按 ID 升序排列；相同 ID 时比较缩并轴对以确定方向。交换左右时同步转置轴对，并把原输出顺序记录为 `index<...>` 映射。父节点把孩子映射直接吸收到自己的缩并轴号中，不创建中间置换数组；只有根节点输出顺序与数学表达式不同时，才调用 `permute_components` 恢复顺序。这里不排序求和轴对、不改变缩并的结合方式，也不识别任意代数等价关系。
+
+使用次数按去重后的 DAG 边数统计，同一父节点两次读取同一孩子计为两次；返回根结果计为一次。运行时沿依赖递归求值，仅为使用次数大于一的节点生成 `tuple<optional<结果数组>...>` 缓存，单次使用结果通过临时值交给父节点。缓存每次 `eval` 重新创建，不跨坐标保留；第一版共享缓存持续到本次求值结束，尚未按最后一次使用提前释放。
+
+偏导在编译时通过现有采样位置模板降为场采样、有理常数缩放、加法、除以运行时步长和四方向拼装。执行图不保留黑盒的偏导递归调用；嵌套偏导的整数位移在类型里相加，相同场函数在相同绝对 offset 的采样进入同一个图节点。仅 offset 相同不足以合并不同的函数或运算。不同求值调用仍使用各自的新缓存。
+
+例如 `partial_field<rho, DiffScheme::Central2>(partial_field<nu, DiffScheme::Central2>(f))`的四维 Hessian，直接执行有 64 条采样路径；DAG 只含 33 个不同采样位置，中心 `offset<0,0,0,0>` 只求值一次。同方向分量仍是两个中心一阶差分的复合 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`，未改写成另一个二阶差分公式。
+
+显式置换只组合引用的轴映射，不创建运算节点。加法按布局直接读取分量，缩放保持布局；取迹和投影把布局吸收到轴计划中。对称/反对称始终是单输入投影节点，不展开成排列分支。求逆在二阶输入的存储上计算，并保留转置布局，原执行器和图执行器共用数组求逆内核。
+
+场函数应当在相同输入下返回相同结果。缩并规范化当前限定算术标量；交换乘法操作数、单独物化差分的加权项，以及转置布局下的求逆可能影响浮点舍入细节，对拍采用数值容差。图上的复用是按结构和位置做的 CSE，不进行任意代数化简或浮点运算重结合。未知节点仍给出编译期诊断。
+
+### K 的图执行对拍、bench 与节点图
+
+```powershell
+python tools/bench_k.py --schemes central2 central8
+python tools/bench_k.py --schemes central2 --trace --build-only # 可选：带开销的编译剖析
+python tools/summarize_k_bench.py
+```
+
+`examples/kretschmann_graph_bench.cpp` 使用同一个 K 表达式比较递归执行与 `compile(K).eval()`，在三组坐标、两种步长下对照独立解析值 `48/r^6`。bench 在预热后计七轮中位耗时，使用相同编译选项和防止整次求值被提升到循环外的包装；同时记录度规调用次数。编译脚本默认记录不带剖析的整份构建耗时；可选 `--trace` 从 Clang 时间追踪提取根 `compile(K)` 实例化的包含耗时，不叠加内部事件。时间追踪本身会增加编译开销，两种口径分开记录。
+
+报告保存为 `outputs/k_benchmark_report.md`，原始数据保存为 `k_bench_*.json`、`k_build_*.json`。图数据 `k_structure_*.json` 从实际 C++ 类型导出，分别包含数学树、保留偏导的数学类型 DAG，以及偏导降级后的执行 DAG。`tools/render_k_graph.py --output <HTML片段路径>` 生成可缩放的圆圈节点图，并在 `outputs` 保存对应 SVG；执行树由实际执行 DAG 沿每条路径分别展开，可逐层检查。数学树与展开执行树的节点数使用不同口径，图中分别标明。
+
+哈希桶和节点列表使用纯类型列表；哈希插入仅实例化被选中的桶。使用次数和缓存槽位通过一次编译期数组遍历确定，缓存类型仅拼接共享结果，避免为元数据实例化运行时 tuple 拼接的模板设施。这些调整不改变图节点和数值执行顺序。
 
 ## 验证
 
@@ -319,6 +372,8 @@ python tests/run_tests.py --compiler clang++
 - `contraction_plan.hpp`：`contraction_plan`、`trace_plan` 及位置合法性检查；缩并保留独立的 `contractpair<L, R>`。
 - `contraction_executor.hpp`：仅依据位置计划执行数组的缩并和取迹。
 - `tensor_expression.hpp`：数学表达式节点、编译器类型查看接口、偏导采样执行和 offset 传递。
+- `expression_graph.hpp`：表达式 DAG 大类型、编译期哈希表、带轴映射的规范化、偏导降级、`compile` 和选择性共享缓存求值。
+- `expression_graph_operations.hpp`：图执行的数组运算、单输入投影、步长除法和方向拼装原语。
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化、反对称化的位置计划、指标分析、数组执行与 Tensor 入口。
 - `permutation.hpp`：完整零起始轴置换计划、固定槽位复制执行器与 Tensor 入口。

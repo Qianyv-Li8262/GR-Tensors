@@ -1,0 +1,166 @@
+<div id="k-curvature-graph">
+  <h2>K 的树与 DAG</h2>
+  <div class="viz-controls">
+    <label class="form-label">结构
+      <select id="k-view" class="form-select">
+        <option value="tree">数学树</option>
+        <option value="math_dag" selected>数学 DAG（偏导未展开）</option>
+        <option value="execution_tree">执行树（点击逐层展开）</option>
+        <option value="dag">执行 DAG（偏导已展开）</option>
+      </select>
+    </label>
+    <label class="form-label">差分
+      <select id="k-scheme" class="form-select"></select>
+    </label>
+  </div>
+  <div id="k-counts" class="text-small"></div>
+  <div id="k-compile" class="text-small"></div>
+  <svg id="k-network" class="k-network" role="img" aria-label="K 的运算依赖图，可拖动和缩放"></svg>
+  <div id="k-selected" class="text-small" aria-live="polite"></div>
+  <div class="text-small">× 缩并 · + 相加 · − 取负 · ½ 缩放 · inv 求逆 · ∂ 偏导 · g 度规 · ÷h 步长除法 · ⊕ 拼装</div>
+  <h3>CPU bench · 每次求值的中位耗时</h3>
+  <div class="table-responsive"><table class="table table-sm">
+    <thead><tr><th>策略</th><th class="text-end">递归</th><th class="text-end">DAG</th><th class="text-end">加速</th><th class="text-end">度规调用</th></tr></thead>
+    <tbody id="k-bench"></tbody>
+  </table></div>
+</div>
+<style>
+  #k-curvature-graph{display:grid;gap:calc(var(--font-size-base)*.75)}
+  #k-curvature-graph .k-network{width:100%;height:660px;touch-action:none;display:block}
+  #k-curvature-graph .k-link{fill:none;stroke:var(--muted-foreground);stroke-width:1.2;opacity:.65}
+  #k-curvature-graph .k-circle{fill:var(--background);stroke:var(--foreground);stroke-width:1.2}
+  #k-curvature-graph .k-shared .k-circle{fill:color-mix(in srgb,var(--viz-series-1) 18%,var(--background))}
+  #k-curvature-graph .k-highlight .k-circle{stroke:var(--viz-series-1);stroke-width:2.5}
+  #k-curvature-graph .k-network text{fill:var(--foreground);text-anchor:middle;dominant-baseline:middle;pointer-events:none}
+  #k-curvature-graph .k-faint{opacity:.15}
+  #k-curvature-graph #k-selected{min-height:calc(var(--font-size-base)*2);overflow-wrap:anywhere}
+  @media(max-width:480px){#k-curvature-graph .k-network{height:560px}}
+</style>
+<script>
+(() => {
+  const data = __K_GRAPH_DATA__;
+  const root = document.getElementById('k-curvature-graph');
+  const svg = root.querySelector('#k-network');
+  const viewSelect = root.querySelector('#k-view');
+  const schemeSelect = root.querySelector('#k-scheme');
+  const counts = root.querySelector('#k-counts');
+  const compileInfo = root.querySelector('#k-compile');
+  const detail = root.querySelector('#k-selected');
+  const bench = root.querySelector('#k-bench');
+  const ns = 'http://www.w3.org/2000/svg';
+  let group, current, byId, edgeEls=[], nodeEls=[], transform={x:0,y:0,k:1}, selected=null, drag=null, expanded=new Set(), fullTreeSize=0;
+  const make = (tag, attrs={}) => {
+    const el=document.createElementNS(ns,tag);
+    Object.entries(attrs).forEach(([k,v])=>el.setAttribute(k,v)); return el;
+  };
+  const schemes=Object.keys(data);
+  for(const scheme of schemes){const option=document.createElement('option');option.value=scheme;option.textContent=scheme;schemeSelect.append(option);}
+  schemeSelect.value=schemes.includes('Central8')?'Central8':schemes[0];
+  for(const scheme of schemes){
+    const result=data[scheme].bench,b=result.benchmark,row=document.createElement('tr');
+    const values=[scheme,b.direct_us.toFixed(2)+' μs',b.dag_us.toFixed(2)+' μs',b.speedup.toFixed(2)+'×',result.checks[0].direct_metric_calls+' → '+result.checks[0].dag_metric_calls];
+    values.forEach((value,i)=>{const cell=document.createElement('td');cell.textContent=value;if(i)cell.className='text-end';row.append(cell);});bench.append(row);
+  }
+  function updateTransform(){
+    group.setAttribute('transform',`translate(${transform.x},${transform.y}) scale(${transform.k})`);
+    for(const [el,n] of nodeEls){
+      const text=el.querySelector('text');
+      const important=n.id===current.root||n.id===selected;
+      text.style.display=transform.k>=.8||important?'':'none';
+      text.style.fontSize=(important&&transform.k<.8?14/transform.k:14)+'px';
+    }
+  }
+  function selectNode(id){
+    selected=id;const n=byId.get(id),near=new Set([id]);
+    for(const [a,b] of current.edges){if(a===id)near.add(b);if(b===id)near.add(a);}
+    for(const [el,node]of nodeEls){el.classList.toggle('k-highlight',node.id===id);el.classList.toggle('k-faint',!near.has(node.id));}
+    for(const [el,a,b]of edgeEls)el.classList.toggle('k-faint',a!==id&&b!==id);
+    detail.textContent=`#${n.dagId??id} · ${n.detail} · rank ${n.rank} · offset⟨${n.offset.join(', ')}⟩ · ${viewSelect.value==='execution_tree'?'点击展开输入':`读取 ${n.uses} 次`}`;
+    updateTransform();
+  }
+  function executionTree(dag){
+    const map=new Map(dag.nodes.map(n=>[n.id,n])),deps=new Map(dag.nodes.map(n=>[n.id,[]]));
+    for(const [a,b,i]of dag.edges)deps.get(a).push([i,b]);for(const values of deps.values())values.sort((a,b)=>a[0]-b[0]);
+    const sizes=new Map();function size(id){if(!sizes.has(id))sizes.set(id,1+deps.get(id).reduce((sum,[i,c])=>sum+size(c),0));return sizes.get(id);}
+    fullTreeSize=size(dag.root);
+    const result={root:0,nodes:[],edges:[]};let cursor=0;
+    function walk(id,path,depth){
+      const index=result.nodes.length,children=deps.get(id),open=depth<3||expanded.has(path);
+      const n={...map.get(id),id:index,dagId:id,path,uses:1,folded:children.length>0&&!open};result.nodes.push(n);
+      const childXs=[];
+      if(open)for(const [slot,child]of children){const childId=walk(child,path+'.'+slot,depth+1);result.edges.push([index,childId,slot]);childXs.push(result.nodes[childId].x);}
+      n.x=childXs.length?childXs.reduce((a,b)=>a+b,0)/childXs.length:cursor++*72;n.y=depth*82;return index;
+    }
+    walk(dag.root,'r',0);return result;
+  }
+  function activate(id){
+    const n=byId.get(id);
+    if(viewSelect.value==='execution_tree'&&n.folded){expanded.add(n.path);draw();const found=current.nodes.find(v=>v.path===n.path);selectNode(found.id);}
+    else selectNode(id);
+  }
+  function draw(){
+    const source=data[schemeSelect.value];current=viewSelect.value==='execution_tree'?executionTree(source.dag):source[viewSelect.value];byId=new Map(current.nodes.map(n=>[n.id,n]));
+    compileInfo.textContent=source.build?`常规完整编译 ${source.build.compile_seconds.toFixed(2)} s`+
+      (source.profile?.compile_k_instantiation_seconds?` · 追踪中的 compile(K) ${source.profile.compile_k_instantiation_seconds.toFixed(2)} s（含剖析开销）`:' · 未单独剖析建图阶段'):'';
+    svg.replaceChildren();edgeEls=[];nodeEls=[];selected=null;
+    const title=make('title');title.textContent=schemeSelect.value+' '+viewSelect.options[viewSelect.selectedIndex].textContent;svg.append(title);
+    const desc=make('desc');desc.textContent='圆圈标注操作或度规符号，父节点向下连接输入。带浅色填充的圆圈被多处读取。拖动平移，滚轮或双指缩放，点击圆圈查看相邻依赖。';svg.append(desc);
+    const xs=current.nodes.map(n=>n.x),ys=current.nodes.map(n=>n.y);
+    const laneExtent=Math.max(...xs.map(Math.abs))+105;
+    svg.style.height=viewSelect.value==='math_dag'?Math.min(1280,Math.max(660,Math.max(...ys)+90))+'px':'';
+    const box=svg.getBoundingClientRect();svg.setAttribute('viewBox',`0 0 ${box.width} ${box.height}`);
+    group=make('g');svg.append(group);
+    for(const [a,b,input]of current.edges){
+      const p=byId.get(a),q=byId.get(b),dy=q.y-p.y;
+      const lane=(input%2===0?-1:1)*(laneExtent-40+((a+b+input)%3)*12);
+      const route=dy>150?`M${p.x},${p.y+22} C${p.x},${p.y+50} ${lane},${p.y+30} ${lane},${p.y+55} L${lane},${q.y-55} C${lane},${q.y-30} ${q.x},${q.y-50} ${q.x},${q.y-22}`:
+        `M${p.x},${p.y+22} C${p.x},${p.y+dy*.5} ${q.x},${q.y-dy*.5} ${q.x},${q.y-22}`;
+      const path=make('path',{class:'k-link',d:route});
+      group.append(path);edgeEls.push([path,a,b]);
+    }
+    for(const n of current.nodes){
+      const g=make('g',{'data-node-id':n.id,transform:`translate(${n.x},${n.y})`,class:'cursor-interaction'+(n.uses>1?' k-shared':'')});
+      g.append(make('circle',{r:22,class:'k-circle'}));
+      const text=make('text');text.textContent=n.id===current.root?'K':n.label;if(n.folded)text.setAttribute('y',-4);g.append(text);
+      if(n.folded){const more=make('text',{y:13});more.textContent='…';more.style.fontSize='12px';g.append(more);}
+      g.setAttribute('data-tooltip',`#${n.id} ${n.detail}; offset ${n.offset.join(',')}; uses ${n.uses}`);
+      group.append(g);nodeEls.push([g,n]);
+    }
+    const hasLong=current.edges.some(([a,b])=>byId.get(b).y-byId.get(a).y>150);
+    const minX=hasLong?Math.min(Math.min(...xs)-35,-laneExtent):Math.min(...xs)-35,maxX=hasLong?Math.max(Math.max(...xs)+35,laneExtent):Math.max(...xs)+35,minY=Math.min(...ys)-35,maxY=Math.max(...ys)+35;
+    const scale=Math.min(1,(box.width-20)/(maxX-minX),(box.height-35)/(maxY-minY));
+    transform={k:scale,x:box.width/2-(minX+maxX)/2*scale,y:20-minY*scale};updateTransform();
+    const cached=current.nodes.filter(n=>n.uses>1).length;
+    counts.textContent=(viewSelect.value==='execution_tree'?`完整展开 ${fullTreeSize} 个节点 · 当前显示 ${current.nodes.length} 个`:`${current.nodes.length} 个圆圈 · ${current.edges.length} 条输入边 · ${cached} 个共享节点`)+ ' · 拖动 / 滚轮缩放 / 点击检查';
+    detail.textContent=viewSelect.value==='dag'?'真实 compile(K) 输出；偏导已降为采样和基本运算。':viewSelect.value==='execution_tree'?'同一执行 DAG 沿每条输入边分别展开；带 … 的圆圈可以点击继续展开。':viewSelect.value==='tree'?'数学表达式逐处展开，重复子树仍分别画出；偏导保留为 ∂。':'按数学节点完整类型共享；偏导仍保留为 ∂，并非执行图。';
+  }
+  svg.addEventListener('wheel',e=>{
+    e.preventDefault();const box=svg.getBoundingClientRect(),x=e.clientX-box.left,y=e.clientY-box.top;
+    const k=Math.min(5,Math.max(.012,transform.k*Math.exp(-e.deltaY*.0015))),ratio=k/transform.k;
+    transform={x:x-(x-transform.x)*ratio,y:y-(y-transform.y)*ratio,k};updateTransform();
+  },{passive:false});
+  const pointers=new Map();let pinch=null;
+  svg.addEventListener('pointerdown',e=>{
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(pointers.size===1)drag={x:e.clientX,y:e.clientY,tx:transform.x,ty:transform.y,moved:false,node:e.target.closest('[data-node-id]')?.getAttribute('data-node-id')};
+    if(pointers.size===2){const [a,b]=[...pointers.values()];pinch={distance:Math.hypot(a.x-b.x,a.y-b.y),k:transform.k};}
+    svg.setPointerCapture(e.pointerId);
+  });
+  svg.addEventListener('pointermove',e=>{
+    if(!pointers.has(e.pointerId))return;
+    pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    if(pointers.size===2&&pinch){
+      const [a,b]=[...pointers.values()],box=svg.getBoundingClientRect(),x=(a.x+b.x)/2-box.left,y=(a.y+b.y)/2-box.top;
+      const k=Math.min(5,Math.max(.012,pinch.k*Math.hypot(a.x-b.x,a.y-b.y)/pinch.distance)),ratio=k/transform.k;
+      transform={x:x-(x-transform.x)*ratio,y:y-(y-transform.y)*ratio,k};if(drag)drag.moved=true;
+    }else if(drag){
+      const dx=e.clientX-drag.x,dy=e.clientY-drag.y;drag.moved=drag.moved||Math.hypot(dx,dy)>4;
+      transform.x=drag.tx+dx;transform.y=drag.ty+dy;
+    }updateTransform();
+  });
+  const release=e=>{pointers.delete(e.pointerId);pinch=null;if(!pointers.size&&drag&&!drag.moved&&drag.node!==null&&drag.node!==undefined)activate(Number(drag.node));setTimeout(()=>{if(!pointers.size)drag=null;},0);};
+  svg.addEventListener('pointerup',release);svg.addEventListener('pointercancel',release);
+  viewSelect.addEventListener('change',()=>{expanded.clear();draw();});schemeSelect.addEventListener('change',()=>{expanded.clear();draw();});
+  new ResizeObserver(()=>draw()).observe(svg);draw();
+})();
+</script>

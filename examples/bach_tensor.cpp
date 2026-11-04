@@ -1,4 +1,7 @@
 #include "tensor_expression.hpp"
+#if defined(BACH_COMPILE_GRAPH)
+#include "expression_graph.hpp"
+#endif
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -147,6 +150,16 @@ int main(int argc, char** argv) {
     static_assert(std::is_same_v<typename decltype(B)::result_type, Tensor<double, dn<a>, dn<b>>>);
     using Tree = Stats<typename decltype(B)::node_type>;
     static_assert(Tree::depth == 4, "Bach must retain four nested derivatives of the metric");
+#if defined(BACH_COMPILE_GRAPH)
+    const auto graph = compile(B);
+    using Graph = decltype(graph);
+    static_assert(std::is_same_v<typename Graph::result_type, typename decltype(B)::result_type>);
+    std::cout << "Bach Central" << accuracy << "; mathematical nodes=" << Tree::nodes
+              << "; maximum derivative nesting=" << Tree::depth
+              << "; DAG nodes=" << Graph::node_count << "; cached nodes=" << Graph::cache_count
+              << "; root=" << Graph::root_id << "; metric calls while building=" << metric_calls << '\n';
+    return metric_calls == 0 ? 0 : 1;
+#else
     if (metric_calls != 0) return 1;
     std::cout << "Central" << accuracy << "; mathematical nodes=" << Tree::nodes
               << "; partial nodes=" << Tree::partials << "; maximum derivative nesting=" << Tree::depth
@@ -206,4 +219,5 @@ int main(int argc, char** argv) {
     }
     std::cout << (passed ? "PASS" : "FAIL") << ": all 16 Bach and 256 Weyl components checked against analytic references\n";
     return passed ? 0 : 1;
+#endif
 }

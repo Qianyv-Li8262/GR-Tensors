@@ -230,6 +230,41 @@ struct PermuteExpr {
     }
 };
 
+namespace expression_detail {
+
+template <typename Scalar>
+std::array<Scalar, 16> inverse_components(const std::array<Scalar, 16>& input) {
+    std::array<Scalar, 32> rows{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = 0; j < 4; ++j) {
+            rows[8 * i + j] = input[4 * i + j];
+            rows[8 * i + 4 + j] = i == j ? 1 : 0;
+        }
+    }
+    for (std::size_t col = 0; col < 4; ++col) {
+        std::size_t pivot = col;
+        for (std::size_t row = col + 1; row < 4; ++row) {
+            if (std::abs(rows[8 * row + col]) > std::abs(rows[8 * pivot + col])) pivot = row;
+        }
+        assert(rows[8 * pivot + col] != 0 && "metric must be invertible");
+        for (std::size_t j = 0; j < 8; ++j) std::swap(rows[8 * col + j], rows[8 * pivot + j]);
+        const auto divisor = rows[8 * col + col];
+        for (std::size_t j = 0; j < 8; ++j) rows[8 * col + j] /= divisor;
+        for (std::size_t row = 0; row < 4; ++row) {
+            if (row == col) continue;
+            const auto factor = rows[8 * row + col];
+            for (std::size_t j = 0; j < 8; ++j) rows[8 * row + j] -= factor * rows[8 * col + j];
+        }
+    }
+    std::array<Scalar, 16> result{};
+    for (std::size_t i = 0; i < 4; ++i) {
+        for (std::size_t j = 0; j < 4; ++j) result[4 * i + j] = rows[8 * i + 4 + j];
+    }
+    return result;
+}
+
+} // namespace expression_detail
+
 template <typename Node, typename PointOffset = offset<>>
 struct InverseExpr {
     using point_offset = PointOffset;
@@ -243,33 +278,7 @@ struct InverseExpr {
     template <typename Coordinate>
     auto eval_components(const Coordinate& x, double h = 1e-2) const {
         const auto input = operand.eval_components(x, h);
-        std::array<scalar_type, 32> rows{};
-        for (std::size_t i = 0; i < 4; ++i) {
-            for (std::size_t j = 0; j < 4; ++j) {
-                rows[8 * i + j] = input[4 * i + j];
-                rows[8 * i + 4 + j] = i == j ? 1 : 0;
-            }
-        }
-        for (std::size_t col = 0; col < 4; ++col) {
-            std::size_t pivot = col;
-            for (std::size_t row = col + 1; row < 4; ++row) {
-                if (std::abs(rows[8 * row + col]) > std::abs(rows[8 * pivot + col])) pivot = row;
-            }
-            assert(rows[8 * pivot + col] != 0 && "metric must be invertible");
-            for (std::size_t j = 0; j < 8; ++j) std::swap(rows[8 * col + j], rows[8 * pivot + j]);
-            const auto divisor = rows[8 * col + col];
-            for (std::size_t j = 0; j < 8; ++j) rows[8 * col + j] /= divisor;
-            for (std::size_t row = 0; row < 4; ++row) {
-                if (row == col) continue;
-                const auto factor = rows[8 * row + col];
-                for (std::size_t j = 0; j < 8; ++j) rows[8 * row + j] -= factor * rows[8 * col + j];
-            }
-        }
-        std::array<scalar_type, 16> result{};
-        for (std::size_t i = 0; i < 4; ++i) {
-            for (std::size_t j = 0; j < 4; ++j) result[4 * i + j] = rows[8 * i + 4 + j];
-        }
-        return result;
+        return expression_detail::inverse_components(input);
     }
 };
 

@@ -6,6 +6,11 @@ TMP_tensor_practice.cpp
 start_claude.ps1
 /misc/
 /tests/.build/
+/outputs/k_trace_*.json
+__pycache__/
 *.txt
 *.md
 !README.md
+*.json
+*.log
+*.svg
