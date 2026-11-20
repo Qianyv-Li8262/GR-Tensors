@@ -297,6 +297,37 @@ using sample_offset = offset<O::values[0] + (Axis == 0 ? Distance : 0),
                              O::values[2] + (Axis == 2 ? Distance : 0),
                              O::values[3] + (Axis == 3 ? Distance : 0)>;
 
+template <DiffScheme Scheme, typename Scalar, std::size_t Rank, typename Read, std::size_t... I>
+auto sum_stencil(Read read, double h, std::index_sequence<I...>) {
+    using stencil = derivative_stencil<Scheme>;
+    std::array<Scalar, pow4(Rank)> result{};
+    auto accumulate = [&](auto position) {
+        constexpr double weight = static_cast<double>(stencil::weights[decltype(position)::value]) /
+                                  stencil::denominator;
+        const auto values = read(position);
+        for (std::size_t j = 0; j < result.size(); ++j) {
+            result[j] += weight * values[j];
+        }
+    };
+    (accumulate(std::integral_constant<std::size_t, I>{}), ...);
+    for (auto& value : result) {
+        value /= h;
+    }
+    return result;
+}
+
+template <typename Scalar, std::size_t Rank, typename Read, std::size_t... Axis>
+auto pack_directions(Read read, std::index_sequence<Axis...>) {
+    std::array<Scalar, pow4(Rank)> result{};
+    auto copy_direction = [&](auto axis) {
+        constexpr std::size_t a = decltype(axis)::value;
+        const auto values = read(axis);
+        std::copy(values.begin(), values.end(), result.begin() + a * values.size());
+    };
+    (copy_direction(std::integral_constant<std::size_t, Axis>{}), ...);
+    return result;
+}
+
 } // namespace expression_detail
 
 // One direction: explicitly stored sampling subtrees, followed by a weighted sum.
@@ -317,20 +348,8 @@ struct StencilSumExpr {
 
     template <typename Coordinate, std::size_t... I>
     auto evaluate(const Coordinate& x, double h, std::index_sequence<I...>) const {
-        std::array<scalar_type, pow4(rank)> result{};
-        auto accumulate = [&](const auto& sample, auto position) {
-            constexpr double weight = static_cast<double>(stencil::weights[decltype(position)::value]) /
-                                      stencil::denominator;
-            const auto values = sample.eval_components(x, h);
-            for (std::size_t j = 0; j < result.size(); ++j) {
-                result[j] += weight * values[j];
-            }
-        };
-        (accumulate(std::get<I>(samples), std::integral_constant<std::size_t, I>{}), ...);
-        for (auto& value : result) {
-            value /= h;
-        }
-        return result;
+        auto read = [&](auto i) { return std::get<decltype(i)::value>(samples).eval_components(x, h); };
+        return expression_detail::sum_stencil<Scheme, scalar_type, rank>(read, h, std::index_sequence<I...>{});
     }
 
     template <typename Coordinate>
@@ -352,14 +371,8 @@ struct SampledPartialExpr {
 
     template <typename Coordinate, std::size_t... Axis>
     auto evaluate(const Coordinate& x, double h, std::index_sequence<Axis...>) const {
-        std::array<scalar_type, pow4(rank)> result{};
-        auto copy_direction = [&](auto axis) {
-            constexpr std::size_t a = decltype(axis)::value;
-            const auto values = std::get<a>(directions).eval_components(x, h);
-            std::copy(values.begin(), values.end(), result.begin() + a * values.size());
-        };
-        (copy_direction(std::integral_constant<std::size_t, Axis>{}), ...);
-        return result;
+        auto read = [&](auto axis) { return std::get<decltype(axis)::value>(directions).eval_components(x, h); };
+        return expression_detail::pack_directions<scalar_type, rank>(read, std::index_sequence<Axis...>{});
     }
 
     template <typename Coordinate>
@@ -387,7 +400,7 @@ struct PartialExpr {
 
     template <typename Coordinate>
     auto eval_components(const Coordinate& x, double h = 1e-2) const {
-        return expression_detail::partial_samples<Node, Scheme>::exec(operand).eval_components(x, h);
+        return expression_detail::partial_samples<Node, Scheme>::evaluate(operand, x, h);
     }
 };
 
@@ -542,6 +555,15 @@ struct make_direction<Node, Scheme, Axis, std::index_sequence<I...>> {
     using sample = expand<Node, sample_offset<typename Node::point_offset, Axis,
                                               derivative_stencil<Scheme>::offsets[Position]>>;
     using result = StencilSumExpr<Scheme, typename Node::point_offset, typename sample<I>::result...>;
+    template <typename Coordinate>
+    static auto evaluate(const Node& node, const Coordinate& x, double h) {
+        auto read = [&](auto i) {
+            const auto sampled = sample<decltype(i)::value>::exec(node);
+            return sampled.eval_components(x, h);
+        };
+        return sum_stencil<Scheme, typename Node::scalar_type, Node::rank>(read, h, std::index_sequence<I...>{});
+    }
+
     static result exec(const Node& node) {
         return {typename result::samples_type{sample<I>::exec(node)...}};
     }
@@ -555,6 +577,17 @@ struct partial_samples {
     using D3 = make_direction<Node, Scheme, 3>;
     using result = SampledPartialExpr<typename D0::result, typename D1::result, typename D2::result,
                                       typename D3::result, typename Node::point_offset>;
+    // Direct evaluation consumes each sample immediately. Only explicit
+    // expansion needs to instantiate and fill the tuples of sampled nodes.
+    template <typename Coordinate>
+    static auto evaluate(const Node& node, const Coordinate& x, double h) {
+        derivative_detail::check_step(x, h);
+        auto read = [&](auto axis) {
+            return make_direction<Node, Scheme, decltype(axis)::value>::evaluate(node, x, h);
+        };
+        return pack_directions<typename Node::scalar_type, Node::rank + 1>(read, std::make_index_sequence<4>{});
+    }
+
     static result exec(const Node& node) {
         return {typename result::directions_type{D0::exec(node), D1::exec(node), D2::exec(node), D3::exec(node)}};
     }

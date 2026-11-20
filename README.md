@@ -295,7 +295,7 @@ auto same_tree = partial<rho, DiffScheme::Central8>(expression);
 auto same_values = partial<rho, DiffScheme::Central8>(expression, x, 0.01);
 ```
 
-`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。数学节点 `PartialExpr` 与执行节点 `SampledPartialExpr` 分离；数学树直接调用 `.eval()` 时使用原有的四方向 `StencilSumExpr` 采样执行，加权求和后除以 `h`，这条直接执行路径不做 CSE。另一条 `compile` 路径在建图时降级偏导，并复用相同位置的采样，见下文。
+`derivative_stencil<Scheme>` 在编译期确定采样位置和权重：二、四、六、八阶策略每个方向分别有 2、4、6、8 个点。数学树直接调用 `.eval()` 时，依次展开并求值每个方向的各个采样点，加权求和后除以 `h`。显式展开的 `SampledPartialExpr` 与 `StencilSumExpr` 保留采样树，并共用相同的数值运算。建图时，`compile` 直接生成四个方向的运算节点，复用相同的采样子树。
 
 嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。数学树的直接执行器仍分别执行各采样路径，不做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
 
@@ -361,7 +361,7 @@ python tools/summarize_k_bench.py
 
 报告保存为 `outputs/k_benchmark_report.md`，原始数据保存为 `k_bench_*.json`、`k_build_*.json`。图数据 `k_structure_*.json` 从实际 C++ 类型导出，分别包含数学树、保留偏导的数学类型 DAG，以及偏导降级后的执行 DAG。`tools/render_k_graph.py --output <HTML片段路径>` 生成可缩放的圆圈节点图，并在 `outputs` 保存对应 SVG；执行树由实际执行 DAG 沿每条路径分别展开，可逐层检查。数学树与展开执行树的节点数使用不同口径，图中分别标明。
 
-哈希桶内部使用纯类型列表；桶目录采用共享未修改分支的类型二叉树，每次插入只重建到目标桶的路径。建图节点存储使用 32 个一组的尾部类型列表和不可变的已完成块，新节点只扩展尾块，发布 `ExprGraph` 时才摊平为完整节点包；内部的纯 `type_list` 构造路径仍支持。复合类型的哈希组合已缓存的子类型哈希；`NodeKey` 直接组合操作哈希与整数孩子 ID，避免为每组 ID 重新扫描类型字符串。左右排序仍使用类型字符串，哈希碰撞仍比较完整键类型，入口命中仍跳过子树编译。使用次数和缓存槽位通过一次编译期数组遍历确定，缓存类型仅拼接共享结果。这些调整不改变最终图类型和数值执行顺序。`python tools/bench_graph_compile.py --output outputs/graph_compile.json` 可测量不实例化求值器的 K 建图探针（包含小型驱动程序的代码生成与链接）；比较前后报告的 `graph_type_sha256` 可核对完整图类型。
+桶目录采用持久化类型二叉树，每次插入只重建到目标桶的路径。键的桶编号在各版本的表之间复用。桶继承各个键值条目，查找时由模板推导选出键类型完全匹配的基类。建图节点存储使用 32 个一组的尾部类型列表和不可变的已完成块，新节点只扩展尾块，发布 `ExprGraph` 时才摊平为完整节点包；内部的纯 `type_list` 构造路径仍支持。复合类型的哈希组合已缓存的子类型哈希；`NodeKey` 直接组合操作哈希与整数孩子 ID，避免为每组 ID 重新扫描类型字符串。左右排序仍使用类型字符串，哈希碰撞仍比较完整键类型，入口命中仍跳过子树编译。使用次数和缓存槽位通过一次编译期数组遍历确定，缓存类型仅拼接共享结果。这些调整不改变最终图类型和数值执行顺序。`python tools/bench_graph_compile.py --output outputs/graph_compile.json` 可测量不实例化求值器的 K 建图探针（包含小型驱动程序的代码生成与链接）；比较前后报告的 `graph_type_sha256` 可核对完整图类型。
 
 加法与方向拼装的逐分量数值内核按标量和轴布局共享模板实例，避免随节点 ID、采样 offset 和求值 Context 重复展开。它们保留输入求值顺序和逐分量计算方式。`python tools/bench_graph_kernels.py --label NAME` 使用 `tools/profile_compile.py` 已导出的 K Central2/4 图，测量求值测试程序的编译时间和运行性能；结果写入 `outputs/kernel_compile/NAME/`，不重新建图。首次优化的前后测量见 `outputs/kernel_compile/summary.md`。
 

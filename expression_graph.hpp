@@ -95,17 +95,16 @@ struct HashLookup<Value, std::void_t<decltype(Value::value)>> {
     static constexpr auto value = Value::value;
 };
 
-template <typename Key, typename Bucket>
-struct bucket_find;
+// Deduce the value from the matching base. An absent key selects the fallback.
+// This avoids instantiating a fresh chain of list suffixes for every lookup.
+template <typename... Entries>
+struct HashBucket : Entries... {};
+
+template <typename Key, typename Value>
+HashLookup<Value> lookup_bucket(const HashEntry<Key, Value>*);
 
 template <typename Key>
-struct bucket_find<Key, type_list<>> : HashLookup<MissingEntry> {};
-
-template <typename Key, typename Head, typename... Tail>
-struct bucket_find<Key, type_list<Head, Tail...>>
-    : std::conditional_t<std::is_same_v<Key, typename Head::key>,
-                         HashLookup<typename Head::mapped_type>,
-                         bucket_find<Key, type_list<Tail...>>> {};
+HashLookup<MissingEntry> lookup_bucket(...);
 
 // A persistent directory shares untouched branches between table versions.
 // Insertion rebuilds one root-to-bucket path instead of expanding every bucket.
@@ -119,7 +118,7 @@ struct empty_buckets {
 };
 
 template <>
-struct empty_buckets<1> { using type = type_list<>; };
+struct empty_buckets<1> { using type = HashBucket<>; };
 
 // Let TypeHashTable's public diagnostic handle zero instead of recursing here.
 template <>
@@ -146,7 +145,7 @@ struct bucket_at<Index, Count, BucketBranch<Left, Right>> : std::conditional_t<
     bucket_at<Index - Count / 2, Count - Count / 2, Right>> {};
 
 template <typename... Entries>
-struct bucket_at<0, 1, type_list<Entries...>> { using type = type_list<Entries...>; };
+struct bucket_at<0, 1, HashBucket<Entries...>> { using type = HashBucket<Entries...>; };
 
 template <std::size_t Index, std::size_t Count, typename Tree, typename Entry>
 struct bucket_insert;
@@ -171,9 +170,20 @@ struct bucket_insert<Index, Count, BucketBranch<Left, Right>, Entry>
     : insert_branch<Index, Count, Left, Right, Entry> {};
 
 template <typename... Entries, typename Entry>
-struct bucket_insert<0, 1, type_list<Entries...>, Entry> {
-    using type = type_list<Entries..., Entry>;
+struct bucket_insert<0, 1, HashBucket<Entries...>, Entry> {
+    using type = HashBucket<Entries..., Entry>;
 };
+
+// The bucket number depends only on the key and hash policy, and can be
+// reused across every version of the persistent table.
+template <std::size_t Count, template <typename> class Hasher>
+struct BucketPolicy {
+    template <typename Key>
+    static constexpr std::size_t bucket_index = Hasher<Key>::value % Count;
+};
+
+template <typename Operation, typename State, typename Inputs, bool Found>
+struct intern_impl;
 
 } // namespace dag_detail
 
@@ -181,27 +191,32 @@ struct bucket_insert<0, 1, type_list<Entries...>, Entry> {
 template <std::size_t BucketCount = 64,
           template <typename> class Hasher = dag_detail::TypeHash,
           typename Buckets = typename dag_detail::empty_buckets<BucketCount>::type>
-struct TypeHashTable {
+struct TypeHashTable : dag_detail::BucketPolicy<BucketCount, Hasher> {
     static_assert(BucketCount > 0, "DAG hash table requires at least one bucket");
     static constexpr std::size_t bucket_count = BucketCount;
 
-    template <typename Key>
-    static constexpr std::size_t bucket_index = Hasher<Key>::value % BucketCount;
-
-    template <typename Key>
-    using find = dag_detail::bucket_find<Key,
-        typename dag_detail::bucket_at<bucket_index<Key>, BucketCount, Buckets>::type>;
-
 private:
-    template <typename Key, typename Value>
-    struct inserted {
-        using type = TypeHashTable<BucketCount, Hasher, typename dag_detail::bucket_insert<
-            bucket_index<Key>, BucketCount, Buckets, dag_detail::HashEntry<Key, Value>>::type>;
-    };
+    using policy = dag_detail::BucketPolicy<BucketCount, Hasher>;
 
+    template <typename Key>
+    using bucket = typename dag_detail::bucket_at<policy::template bucket_index<Key>, BucketCount, Buckets>::type;
+
+    template <typename, typename, typename, bool>
+    friend struct dag_detail::intern_impl;
+
+    // Available to the interner only after its lookup has established absence.
+    template <typename Key, typename Value>
+    using insert_missing = TypeHashTable<BucketCount, Hasher, typename dag_detail::bucket_insert<
+        policy::template bucket_index<Key>, BucketCount, Buckets, dag_detail::HashEntry<Key, Value>>::type>;
+
+    template <typename Key, typename Value>
+    struct inserted { using type = insert_missing<Key, Value>; };
     struct unchanged { using type = TypeHashTable; };
 
 public:
+    template <typename Key>
+    using find = decltype(dag_detail::lookup_bucket<Key>(static_cast<bucket<Key>*>(nullptr)));
+
     template <typename Key, typename Value>
     struct bind {
         static constexpr bool missing = std::is_same_v<typename find<Key>::type, dag_detail::MissingEntry>;
@@ -493,23 +508,25 @@ struct BuildState {
     using table = Table;
 };
 
-template <typename Operation, typename State, typename Inputs, bool Found>
-struct intern_impl;
+// Keep the ID constant independent of the (potentially very large) build state.
+template <std::size_t Id>
+struct InternedId { static constexpr std::size_t id = Id; };
 
 template <typename Operation, typename State, std::size_t... Inputs>
-struct intern_impl<Operation, State, std::index_sequence<Inputs...>, true> {
+struct intern_impl<Operation, State, std::index_sequence<Inputs...>, true>
+    : InternedId<State::table::template find<NodeKey<Operation, Inputs...>>::value> {
     using state = State;
     using table = typename State::table;
-    static constexpr std::size_t id = table::template find<NodeKey<Operation, Inputs...>>::value;
 };
 
 template <typename Operation, typename State, std::size_t... Inputs>
-struct intern_impl<Operation, State, std::index_sequence<Inputs...>, false> {
-    static constexpr std::size_t id = stored_node_count<typename State::nodes>::value;
+struct intern_impl<Operation, State, std::index_sequence<Inputs...>, false>
+    : InternedId<stored_node_count<typename State::nodes>::value> {
+    using InternedId<stored_node_count<typename State::nodes>::value>::id;
     using node = DAGNode<id, Operation, Inputs...>;
     using old_table = typename State::table;
-    using table = typename old_table::template bind<NodeKey<Operation, Inputs...>,
-        NodeRef<id, identity<Operation::rank>>>::type;
+    using table = typename old_table::template insert_missing<NodeKey<Operation, Inputs...>,
+        NodeRef<id, identity<Operation::rank>>>;
     using state = BuildState<typename append_node<typename State::nodes, node>::type, table>;
 };
 
@@ -560,10 +577,12 @@ struct compile_node : compile_dispatch<Node, State, normalize_source<Node>,
     !std::is_same_v<typename State::table::template find<typename normalize_source<Node>::key>::type,
                     MissingEntry>> {};
 
-template <auto Function, typename Offset, typename State>
-struct build_node<FieldExpr<Function, Offset>, State> {
+template <auto Function, typename Offset, typename State, typename Source>
+struct compile_dispatch<FieldExpr<Function, Offset>, State, Source, false> {
     using operation = FieldOp<Function, Offset>;
-    using built = intern<operation, State>;
+    // For a leaf the source key and operation key are identical.
+    static constexpr bool source_hit = false;
+    using built = intern_impl<operation, State, std::index_sequence<>, false>;
     using state = typename built::state;
     using ref = NodeRef<built::id, identity<operation::rank>>;
 };
@@ -729,33 +748,39 @@ struct stencil_fold<Scheme, Offset, Scalar, State, Position, Accumulator, Head, 
     using ref = typename next::ref;
 };
 
-template <DiffScheme Scheme, typename Offset, typename... Samples, typename State>
-struct build_node<StencilSumExpr<Scheme, Offset, Samples...>, State>
-    : stencil_fold<Scheme, Offset, typename StencilSumExpr<Scheme, Offset, Samples...>::scalar_type,
-                   State, 0, void, Samples...> {};
+template <DiffScheme Scheme, typename Offset, typename First, typename... Rest, typename State>
+struct build_node<StencilSumExpr<Scheme, Offset, First, Rest...>, State>
+    : stencil_fold<Scheme, Offset, typename First::scalar_type, State, 0, void, First, Rest...> {};
 
-template <typename D0, typename D1, typename D2, typename D3, typename Offset, typename State>
-struct build_node<SampledPartialExpr<D0, D1, D2, D3, Offset>, State> {
-    using a = compile_node<D0, State>;
-    using b = compile_node<D1, typename a::state>;
-    using c = compile_node<D2, typename b::state>;
-    using d = compile_node<D3, typename c::state>;
-    using operation = PackDirectionsOp<typename D0::scalar_type, Offset,
+template <typename Scalar, typename Offset, typename State,
+          template <typename, typename> class CompileDirection,
+          typename D0, typename D1, typename D2, typename D3>
+struct build_directions {
+    using a = CompileDirection<D0, State>;
+    using b = CompileDirection<D1, typename a::state>;
+    using c = CompileDirection<D2, typename b::state>;
+    using d = CompileDirection<D3, typename c::state>;
+    using operation = PackDirectionsOp<Scalar, Offset,
         typename a::ref::layout, typename b::ref::layout, typename c::ref::layout, typename d::ref::layout>;
     using built = intern<operation, typename d::state, a::ref::id, b::ref::id, c::ref::id, d::ref::id>;
     using state = typename built::state;
     using ref = NodeRef<built::id, identity<operation::rank>>;
 };
 
+template <typename D0, typename D1, typename D2, typename D3, typename Offset, typename State>
+struct build_node<SampledPartialExpr<D0, D1, D2, D3, Offset>, State>
+    : build_directions<typename D0::scalar_type, Offset, State, compile_node, D0, D1, D2, D3> {};
+
+// A source lookup has already missed on the mathematical partial. Lower its
+// four synthetic stencils directly, without indexing the tuple-backed wrappers.
+// Actual sample subtrees still go through compile_node and all operations are interned.
 template <typename Node, DiffScheme Scheme, typename Offset, typename State>
-struct build_node<PartialExpr<Node, Scheme, Offset>, State> {
-    // Only TYPES are expanded. No sampled expression objects or evaluations
-    // are created here. Nested expand accumulates absolute integer offsets.
-    using sampled = typename expression_detail::partial_samples<Node, Scheme>::result;
-    using lowered = compile_node<sampled, State>;
-    using state = typename lowered::state;
-    using ref = typename lowered::ref;
-};
+struct build_node<PartialExpr<Node, Scheme, Offset>, State>
+    : build_directions<typename Node::scalar_type, Offset, State, build_node,
+          typename expression_detail::make_direction<Node, Scheme, 0>::result,
+          typename expression_detail::make_direction<Node, Scheme, 1>::result,
+          typename expression_detail::make_direction<Node, Scheme, 2>::result,
+          typename expression_detail::make_direction<Node, Scheme, 3>::result> {};
 
 template <typename Result, typename Ref>
 struct GraphOutput {
@@ -772,8 +797,8 @@ struct Evaluation {
     template <std::size_t Id>
     decltype(auto) get() {
         using node = typename Graph::template node<Id>;
-        if constexpr (Graph::template use_count<Id> > 1) {
-            auto& slot = cache.template get<Graph::template cache_index<Id>>();
+        if constexpr (Graph::uses[Id] > 1) {
+            auto& slot = cache.template get<Graph::cache_indices[Id]>();
             if (!slot) slot.emplace(node::execute(*this));
             return static_cast<const typename node::result_type&>(*slot);
         } else {
@@ -882,7 +907,7 @@ struct ExprGraph {
     static constexpr std::size_t cache_index = cache_indices[Id];
 
     using cache_type = typename dag_detail::cache_storage<type_list<>, std::conditional_t<
-        (use_count<Nodes::id> > 1), type_list<std::optional<typename Nodes::result_type>>, type_list<>>...>::type;
+        (uses[Nodes::id] > 1), type_list<std::optional<typename Nodes::result_type>>, type_list<>>...>::type;
     static constexpr std::size_t cache_count = cache_type::size;
 
     template <typename Coordinate>

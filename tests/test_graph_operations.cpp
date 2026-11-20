@@ -71,6 +71,10 @@ void check_first(const coord<mu>& x) {
     calls = 0;
     const auto graph = compile(p);
     static_assert(decltype(graph)::requires_step);
+    using Sampled = typename expression_detail::partial_samples<FieldExpr<&polynomial>, Scheme>::result;
+    using ExplicitStencil = IndexedExpr<Sampled, dn<nu>>;
+    static_assert(std::is_same_v<decltype(compile(p)), decltype(compile(ExplicitStencil{}))>,
+                  "lowering a partial must produce the same DAG as compiling its explicit samples");
     constexpr auto count = 4 * derivative_stencil<Scheme>::offsets.size();
     static_assert(graph_stats<decltype(compile(p))>::leaf_count == count);
     check(calls == 0, "compile must not sample derivatives");

@@ -165,7 +165,8 @@ void check_derivative_scheme() {
     const auto field = make_field<&monomial_field<Power>>();
     const auto derivative = partial_field<mu, Scheme>(field);
     using tree = typename decltype(derivative)::node_type;
-    using sampled = typename expression_detail::partial_samples<typename decltype(field)::node_type, Scheme>::result;
+    using sampling = expression_detail::partial_samples<typename decltype(field)::node_type, Scheme>;
+    using sampled = typename sampling::result;
     using direction = typename nth_type<0, typename sampled::children>::result;
     static_assert(list_size<typename tree::children>::value == 1);
     static_assert(list_size<typename sampled::children>::value == 4);
@@ -195,6 +196,11 @@ void check_derivative_scheme() {
                   "sampling subtree must use its compile-time offset from the original root");
         }
     }
+    const auto expected_samples = derivative_samples;
+    derivative_samples.clear();
+    const auto expanded = sampling::exec(field.node);
+    check(expanded.eval_components(x, h) == value.data && derivative_samples == expected_samples,
+          "direct and explicitly expanded stencils must agree on values and sampling order");
 }
 
 void check_derivatives() {
