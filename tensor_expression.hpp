@@ -474,7 +474,6 @@ auto expand_at(const Expression& expression) {
 }
 
 // Named function entry point, e.g. make_field<&metric>().
-// The existing make_field(callable) API remains available for opaque lambda fields.
 template <auto Function, typename PointOffset = offset<>>
 auto make_field() {
     using node = FieldExpr<Function, PointOffset>;
@@ -579,6 +578,25 @@ template <typename DerivLetter, DiffScheme Scheme = DiffScheme::Central8,
           typename Node, typename... Indices, typename CoordLetter>
 auto partial(const IndexedExpr<Node, Indices...>& field, const coord<CoordLetter>& x, double h = 1e-2) {
     return partial_field<DerivLetter, Scheme>(field).eval(x, h);
+}
+
+// Raise the derivative index while retaining the full mathematical expression.
+template <typename UpLetter, typename DummyLetter, DiffScheme Scheme = DiffScheme::Central8,
+          typename Node, typename... Indices, typename MetricNode, typename First, typename Second>
+auto partial_up(const IndexedExpr<Node, Indices...>& field,
+                const IndexedExpr<MetricNode, First, Second>& inv_metric) {
+    static_assert(index_traits<First>::variance::value && index_traits<Second>::variance::value,
+                  "partial_up requires an inverse metric with two upper indices");
+    return rename_field<up<UpLetter>, up<DummyLetter>>(inv_metric) * partial_field<DummyLetter, Scheme>(field);
+}
+
+template <typename UpLetter, typename DummyLetter, DiffScheme Scheme = DiffScheme::Central8,
+          typename Node, typename... Indices, typename MetricNode, typename First, typename Second,
+          typename CoordLetter>
+auto partial_up(const IndexedExpr<Node, Indices...>& field,
+                const IndexedExpr<MetricNode, First, Second>& inv_metric,
+                const coord<CoordLetter>& x, double h = 1e-2) {
+    return partial_up<UpLetter, DummyLetter, Scheme>(field, inv_metric).eval(x, h);
 }
 
 

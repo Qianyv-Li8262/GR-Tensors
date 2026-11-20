@@ -1,6 +1,10 @@
 #include "tensor_expression.hpp"
+#include "bach_formula.hpp"
 #if defined(BACH_COMPILE_GRAPH)
 #include "expression_graph.hpp"
+#endif
+#if defined(BACH_EXPORT_GRAPH)
+#include "graph_type_export.hpp"
 #endif
 #include <algorithm>
 #include <cmath>
@@ -8,64 +12,6 @@
 #include <iomanip>
 #include <iostream>
 #include <string_view>
-
-// Only the test metric is configurable. The expression and its difference scheme
-// stay fixed while each evaluation starts with a fresh set of parameters.
-struct MetricParameters {
-    double first = 0.6;
-    double second = 1.0;
-    double conformal = 0;
-};
-MetricParameters parameters;
-std::uint64_t metric_calls = 0;
-
-double conformal_factor(const coord<mu>& x) {
-    return parameters.conformal *
-           (0.13 * x(0) - 0.17 * x(1) + 0.11 * x(2) + 0.07 * x(3) + 0.05 * x(0) * x(2));
-}
-
-// g0 = dx0^2 + exp(2 A x0) dx1^2 + dx2^2 + exp(2 D x2) dx3^2.
-// Its two surface curvatures are k1 = -A^2 and k2 = -D^2.
-// g = exp(2 phi) g0 also tests nonparallel Weyl curvature in all four coordinates.
-auto metric(const coord<mu>& x) {
-    ++metric_calls;
-    Tensor<double, dn<a>, dn<b>> result;
-    const double omega2 = std::exp(2 * conformal_factor(x));
-    result(0, 0) = result(2, 2) = omega2;
-    result(1, 1) = omega2 * std::exp(2 * parameters.first * x(0));
-    result(3, 3) = omega2 * std::exp(2 * parameters.second * x(2));
-    return result;
-}
-
-// An independent analytic reference, without differences or expression helpers.
-// Parallel Weyl curvature of the product gives B_ij = (k1^2-k2^2)/6 g0_ij
-// on the first surface and the negative of this on the second surface.
-// In dimension four, B[exp(2 phi) g0]_ij = exp(-2 phi) B[g0]_ij.
-auto exact_bach(const coord<mu>& x) {
-    Tensor<double, dn<a>, dn<b>> result;
-    const double a2 = parameters.first * parameters.first;
-    const double b2 = parameters.second * parameters.second;
-    const double coefficient = (a2 * a2 - b2 * b2) / 6 * std::exp(-2 * conformal_factor(x));
-    result(0, 0) = coefficient;
-    result(1, 1) = coefficient * std::exp(2 * parameters.first * x(0));
-    result(2, 2) = -coefficient;
-    result(3, 3) = -coefficient * std::exp(2 * parameters.second * x(2));
-    return result;
-}
-
-double exact_weyl(const coord<mu>& x, int a, int b, int c, int d) {
-    const double diagonal[]{1, std::exp(2 * parameters.first * x(0)),
-                            1, std::exp(2 * parameters.second * x(2))};
-    const double k[]{-parameters.first * parameters.first, -parameters.second * parameters.second};
-    auto g = [&](int i, int j) { return i == j ? diagonal[i] : 0.0; };
-    auto ric = [&](int i, int j) { return k[i / 2] * g(i, j); };
-    const double riemann = a / 2 == b / 2 && a / 2 == c / 2 && a / 2 == d / 2
-                               ? k[a / 2] * (g(a, c) * g(b, d) - g(a, d) * g(b, c)) : 0;
-    const double weyl = riemann - (g(a, c) * ric(b, d) - g(a, d) * ric(b, c) -
-                                   g(b, c) * ric(a, d) + g(b, d) * ric(a, c)) / 2 +
-                        (k[0] + k[1]) / 3 * (g(a, c) * g(b, d) - g(a, d) * g(b, c));
-    return std::exp(2 * conformal_factor(x)) * weyl;
-}
 
 // Count the mathematical tree without ever lowering a partial to stencil nodes.
 template <typename Node> struct Stats;
@@ -97,56 +43,9 @@ int main(int argc, char** argv) {
     constexpr auto scheme = DiffScheme::Central2;
     constexpr int accuracy = 2;
 #endif
-    // All mathematical expressions are constructed here, from one metric leaf.
-    auto g = make_field<&metric>();
-    auto inverse = inverse_field(g);
-    auto pg = partial_field<mu, scheme>(g);
-    auto Gamma = scale_field<1, 2>(
-        rename_field<up<a>, up<kappa>>(inverse) *
-        (rename_field<dn<b>, dn<kappa>, dn<c>>(pg) +
-         rename_field<dn<c>, dn<kappa>, dn<b>>(pg) -
-         rename_field<dn<kappa>, dn<b>, dn<c>>(pg)));
-    auto pGamma = partial_field<mu, scheme>(Gamma);
-
-    // R^rho_{b c d}; the storage order is [rho, c, b, d].
-    auto q1 = rename_field<up<rho>, dn<c>, dn<lambda>>(Gamma) *
-              rename_field<up<lambda>, dn<b>, dn<d>>(Gamma);
-    auto q2 = rename_field<up<rho>, dn<d>, dn<lambda>>(Gamma) *
-              rename_field<up<lambda>, dn<b>, dn<c>>(Gamma);
-    auto R = q1 - q2 + rename_field<dn<c>, up<rho>, dn<b>, dn<d>>(pGamma) -
-                       rename_field<dn<d>, up<rho>, dn<b>, dn<c>>(pGamma);
-    auto Ricci = trace_field<rho, c>(R); // [b, d], Ric_bd = R^rho_{b rho d}
-    auto scalar = rename_field<up<b>, up<d>>(inverse) * Ricci;
-    auto lower = rename_field<dn<a>, dn<rho>>(g) * R; // R_abcd, storage [a,c,b,d]
-
-    auto ricci_terms =
-        rename_field<dn<a>, dn<c>>(g) * rename_field<dn<b>, dn<d>>(Ricci) -
-        rename_field<dn<a>, dn<d>>(g) * rename_field<dn<b>, dn<c>>(Ricci) -
-        rename_field<dn<b>, dn<c>>(g) * rename_field<dn<a>, dn<d>>(Ricci) +
-        rename_field<dn<b>, dn<d>>(g) * rename_field<dn<a>, dn<c>>(Ricci);
-    auto metric_terms = rename_field<dn<a>, dn<c>>(g) * rename_field<dn<b>, dn<d>>(g) -
-                        rename_field<dn<a>, dn<d>>(g) * rename_field<dn<b>, dn<c>>(g);
-    auto Weyl = lower - scale_field<1, 2>(ricci_terms) + scale_field<1, 6>(scalar) * metric_terms;
-
-    // T_abcd := C_acbd. This view follows the physical storage order of Weyl.
-    auto T = rename_field<dn<a>, dn<b>, dn<c>, dn<d>>(Weyl);
-    auto nabla_T = partial_field<mu, scheme>(T) -
-        rename_field<up<lambda>, dn<mu>, dn<a>>(Gamma) *
-            rename_field<dn<lambda>, dn<b>, dn<c>, dn<d>>(T) -
-        rename_field<up<lambda>, dn<mu>, dn<b>>(Gamma) *
-            rename_field<dn<a>, dn<lambda>, dn<c>, dn<d>>(T) -
-        rename_field<up<lambda>, dn<mu>, dn<c>>(Gamma) *
-            rename_field<dn<a>, dn<b>, dn<lambda>, dn<d>>(T) -
-        rename_field<up<lambda>, dn<mu>, dn<d>>(Gamma) *
-            rename_field<dn<a>, dn<b>, dn<c>, dn<lambda>>(T);
-    auto D = rename_field<up<d>, up<mu>>(inverse) * nabla_T; // D_abc = nabla^d C_acbd
-    auto nabla_D = partial_field<nu, scheme>(D) -
-        rename_field<up<lambda>, dn<nu>, dn<a>>(Gamma) * rename_field<dn<lambda>, dn<b>, dn<c>>(D) -
-        rename_field<up<lambda>, dn<nu>, dn<b>>(Gamma) * rename_field<dn<a>, dn<lambda>, dn<c>>(D) -
-        rename_field<up<lambda>, dn<nu>, dn<c>>(Gamma) * rename_field<dn<a>, dn<b>, dn<lambda>>(D);
-    auto raised_once = rename_field<up<c>, up<kappa>>(inverse) * rename_field<dn<kappa>, dn<lambda>>(Ricci);
-    auto Ricci_up = raised_once * rename_field<up<lambda>, up<d>>(inverse);
-    auto B = rename_field<up<c>, up<nu>>(inverse) * nabla_D + scale_field<1, 2>(Ricci_up * T);
+    auto expressions = make_bach_expressions<scheme>();
+    auto B = std::move(expressions.bach);
+    auto T = std::move(expressions.weyl);
     static_assert(std::is_same_v<typename decltype(B)::result_type, Tensor<double, dn<a>, dn<b>>>);
     using Tree = Stats<typename decltype(B)::node_type>;
     static_assert(Tree::depth == 4, "Bach must retain four nested derivatives of the metric");
@@ -158,6 +57,11 @@ int main(int argc, char** argv) {
               << "; maximum derivative nesting=" << Tree::depth
               << "; DAG nodes=" << Graph::node_count << "; cached nodes=" << Graph::cache_count
               << "; root=" << Graph::root_id << "; metric calls while building=" << metric_calls << '\n';
+#if defined(BACH_EXPORT_GRAPH)
+    const char* path = argc > 1 ? argv[1] : "outputs/bach_compiled_graph_central2.hpp";
+    if (!export_graph_type<Graph>(path, "BachCompiledGraph")) return 2;
+    std::cout << "Saved reusable graph type: " << path << '\n';
+#endif
     return metric_calls == 0 ? 0 : 1;
 #else
     if (metric_calls != 0) return 1;

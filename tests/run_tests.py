@@ -29,8 +29,8 @@ def main():
                           "examples/metric_expression.cpp",
                           "examples/kretschmann_formula.cpp", "examples/kretschmann_compare.cpp", "main.cpp"]:
         executable = build_dir / (Path(relative_path).stem + suffix)
-        # The comparison instantiates the unshared sampled K tree; avoid expensive inlining in this diagnostic.
-        optimization = "-O0" if relative_path == "examples/kretschmann_compare.cpp" else "-O2"
+        # Direct K evaluations instantiate the unshared sampled tree; avoid expensive inlining.
+        optimization = "-O0" if relative_path in ("examples/kretschmann_compare.cpp", "main.cpp") else "-O2"
         built = subprocess.run(flags + [optimization, str(root / relative_path), "-o", str(executable)],
                                capture_output=True, text=True)
         if built.returncode:
@@ -63,6 +63,14 @@ def main():
 
     # Compile snippets from stdin so new plan checks need no extra source files.
     invalid_plans = {
+        "callable field removed": (
+            "auto result = make_field([](const coord<mu>&) { return Tensor<double>{}; });",
+            "no matching function"),
+        "raised derivative lower metric": (
+            "Tensor<double> sample(const coord<mu>&); "
+            "Tensor<double, dn<a>, dn<b>> metric(const coord<mu>&); "
+            "auto result = partial_up<nu, mu>(make_field<&sample>(), make_field<&metric>());",
+            "partial_up requires an inverse metric with two upper indices"),
         "DAG unsupported node": (
             "struct Other { using scalar_type = double; using point_offset = offset<>; enum { rank = 0 }; }; "
             "auto result = compile(IndexedExpr<Other>{});",
@@ -127,7 +135,7 @@ def main():
             "auto result = asym<0, 1>(make_field<&sample>());", "symmetry axes must have the same variance"),
     }
     for name, (body, diagnostic) in invalid_plans.items():
-        source = '#include "field_wrapper.hpp"\n#include "expression_graph.hpp"\nint main() { ' + body + ' }\n'
+        source = '#include "tensor_expression.hpp"\n#include "expression_graph.hpp"\nint main() { ' + body + ' }\n'
         built = subprocess.run(flags + ["-x", "c++", "-fsyntax-only", "-"], input=source,
                                capture_output=True, text=True)
         if built.returncode == 0 or diagnostic not in built.stdout + built.stderr:

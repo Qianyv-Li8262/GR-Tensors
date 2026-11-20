@@ -11,7 +11,7 @@
 - 张量乘法：同名且一上一下的指标自动缩并；同变异性缩并会触发编译期错误。
 - 加减法、数乘、指标改名（`rename`）和显式迹（`trace`）。加减法允许指标排列不同，但要求指标集合一致。
 - 指定零起始轴号的归一化对称化 `sym<...>`、反对称化 `asym<...>`，支持 Tensor 与类型化表达式；原有按指标类型选择的 `symm_orbit`、`asymm_orbit` 继续可用。
-- `Field` 包装器，用于把坐标到张量的映射组合成场表达式。
+- 场运算统一使用 `IndexedExpr` 表达式模板，具名函数作为叶子；支持直接求值和 DAG 求值。
 - `make_field<&function>()`：以具名函数作为类型化叶子，用 `*` 构造缩并表达式递归树。
 - 数值偏导 `partial`：编译期选择二、四、六、八阶中心差分，默认八阶；数学类型保留未展开的偏导节点，数值求值沿用采样执行。`partial_up` 使用逆度规将导数指标抬升。
 
@@ -19,7 +19,7 @@
 
 ## 示例：Schwarzschild 曲率不变量
 
-[`main.cpp`](main.cpp) 定义了 Schwarzschild 度规及其逆度规，并按以下过程数值计算
+[`main.cpp`](main.cpp) 复用 [`examples/kretschmann_formula.hpp`](examples/kretschmann_formula.hpp) 中的 Schwarzschild 表达式构造器，从度规叶子组合求逆、偏导和缩并，并按以下过程数值计算
 
 ```text
 g_ab  ->  Gamma^rho_{mu nu}  ->  R^rho_{sigma mu nu}  ->  K = R_abcd R^abcd
@@ -31,16 +31,18 @@ g_ab  ->  Gamma^rho_{mu nu}  ->  R^rho_{sigma mu nu}  ->  K = R_abcd R^abcd
 K = 48 M^2 / r^6
 ```
 
-比较；只有相对误差小于 `1e-5` 时才以成功状态退出。连接和曲率的嵌套数值微分分别使用独立步长，便于调参。
+比较；只有相对误差小于 `1e-5` 时才以成功状态退出。连接和曲率的嵌套数值微分统一使用 `.eval(x, h)` 传入的步长，示例取 `h=0.01`、`M=1`。
 
 ## 构建和运行
 
 需要支持 C++17 的编译器。仓库没有构建系统，直接编译示例即可：
 
 ```bash
-g++ -std=c++17 -O2 main.cpp -o main
+g++ -std=c++17 -O0 main.cpp -o main
 ./main
 ```
+
+主示例直接求值完整的八阶差分表达式树，使用 `-O0` 避免昂贵的内联优化；DAG 性能对照见下文。
 
 在 Windows 上可将输出文件命名为 `main.exe` 并运行 `./main.exe`。库代码均为头文件；在自己的程序中包含 `tensors_all.hpp` 即可。
 
@@ -172,7 +174,7 @@ auto shifted_result = shifted_expression.eval(x, 0.01);
 
 `expand<Node, O>::result` 由根向下确定节点位置：数学节点传递相同位置，保留偏导操作本身；已有采样执行节点则保留各自的差分位移。`expand_at<O>(expression)` 同时创建对应对象，建树时不调用函数。`O` 是根节点相对 `x` 的绝对中心位置，`expand_at<>(expression)` 恢复零中心。普通缩并要求左右操作数与父节点具有相同 offset；不同采样位置会产生不同节点类型。
 
-这一接口支持场之间的 `+`、`-`、`*`、指标改名、取迹、度规求逆、偏导和求值。`scale_field<1, 2>(expr)` 将有理系数编码为 `std::ratio<1, 2>`，避免 C++17 浮点模板参数的限制。加法的数学节点使用原有 `addition_analysis` 生成的轴置换计划；`contraction_and_arithmetic.hpp` 中的 Tensor 加法保持原实现。原有 callable `Field` 接口继续可用，两种场接口暂不混合组合。
+这一接口支持场之间的 `+`、`-`、`*`、指标改名、取迹、度规求逆、偏导和求值。`scale_field<1, 2>(expr)` 将有理系数编码为 `std::ratio<1, 2>`，避免 C++17 浮点模板参数的限制。加法的数学节点使用原有 `addition_analysis` 生成的轴置换计划；`contraction_and_arithmetic.hpp` 中的 Tensor 加法保持原实现。场接口只接受类型化表达式。叶子使用 `make_field<&function>()`；不再提供 `make_field(callable)`、捕获 lambda 包装或 `DEFINE_TENSOR_FIELD2`。运行时捕获状态、运行时数乘系数和每层独立差分步长尚不支持。
 
 ### 完整轴置换
 
@@ -260,7 +262,16 @@ clang++ -std=c++17 -O0 -I . examples/kretschmann_compare.cpp -o kretschmann_comp
 
 ### Bach 张量的四层偏导示例
 
-[`examples/bach_tensor.cpp`](examples/bach_tensor.cpp) 在 `main()` 中从一个度规叶子组合 `Gamma -> Riemann -> Ricci/Weyl -> 两层协变导数 -> Bach`，每层协变导数均显式包含全部联络项，直接使用现有表达式操作。数学树保留四层偏导，具有 12,160 个节点位置；完整编译器类型见 [`outputs/bach_formula_type_central2.txt`](outputs/bach_formula_type_central2.txt)。没有修改库执行器或加入 CSE。
+[`examples/bach_tensor.cpp`](examples/bach_tensor.cpp) 通过 [`examples/bach_formula.hpp`](examples/bach_formula.hpp) 从一个度规叶子组合 `Gamma -> Riemann -> Ricci/Weyl -> 两层协变导数 -> Bach`，每层协变导数均显式包含全部联络项。度规与独立解析参考放在 `examples/bach_metric_reference.hpp`。数学树保留四层偏导，具有 12,160 个节点位置；提取公共构造器后的完整类型签名与 [`outputs/bach_formula_type_central2.txt`](outputs/bach_formula_type_central2.txt) 中原签名完全相同。
+
+`examples/bach_graph.cpp` 仅实例化 `compile(B)` 并输出图元数据，不实例化求值器；Central2 图包含 4,582 个节点和 1,211 个缓存节点。数值对拍及 bench 使用：
+
+```powershell
+python tools/test_bach_graph.py
+Get-Content outputs/bach_graph_test_status.json -Raw | ConvertFrom-Json
+```
+
+首次运行先编译 `bach_graph_export.cpp`，将实际图类型保存为 `outputs/bach_compiled_graph_central2.hpp`，再编译并运行 `bach_graph_cached_test.cpp`。后续测试直接加载保存的节点包，跳过数学树到 DAG 的建图模板。缓存清单检查公式和内核的指纹；修改数值测试或 bench 不需要重新建图，修改图相关源文件则自动失效。`--rebuild-graph` 可显式重建。确认实现改动保持图节点类型不变时（如缓存存储或哈希桶实现优化），可使用 `--reuse-saved-graph` 复用已有导出；只有数值检查成功后才更新对应指纹。公式、偏导降级或规范化规则有改动时应重新建图。编译和求值检查分阶段写入 `bach_graph_test_status.json`，日志为 `bach_graph_test.log`，数值结果为 `bach_graph_test_results.json`。重试前会将上次状态、日志和结果存入 `outputs/bach_graph_runs/`。Windows 测试程序保留较大的栈空间，容纳高阶导数的缓存与临时数组。
 
 示例默认使用编译期 `Central2`，编译时增加 `-DBACH_CENTRAL4` 可比较四阶中心差分。四种背景包括具有非零解析 Bach 的常曲率曲面乘积及其共形变换，以及两个 Bach 为零的背景；每种背景扫描四组步长，核对全部 16 个 Bach 和 256 个 Weyl 分量。公式、独立解析推导与复现命令见 [`examples/bach_manual.md`](examples/bach_manual.md)，数值结果见 [`outputs/bach_comparison.md`](outputs/bach_comparison.md)。
 
@@ -288,7 +299,7 @@ auto same_values = partial<rho, DiffScheme::Central8>(expression, x, 0.01);
 
 嵌套偏导在编译期合并整数偏移，例如同一方向的外层 `+1` 与内层 `-1` 生成零 offset 的相同叶子类型。数学树的直接执行器仍分别执行各采样路径，不做缓存或子树合并。连续求导保持原差分算子的复合：两次二阶中心一阶差分得到 `(f(x+2h)-2f(x)+f(x-2h))/(4h*h)`。类型化表达式树内部共用 `.eval(x, h)` 传入的步长。
 
-原有 callable `Field` 的数值接口也改为编译期策略：`partial<mu, DiffScheme::Central4>(field, x, h)`、`partial_field<mu, DiffScheme::Central4>(field, h)`，以及 `partial_up<mu, nu, DiffScheme::Central4>(field, inverse, x, h)`。这一路的函数体仍是叶子，结果类型由未求值的表达式推导，不再额外调用一次中心点函数。运行时 `switch` 和接收 `DiffScheme` 实参的重载已移除。
+`partial_up<mu, nu, DiffScheme::Central4>(field, inverse)` 返回逆度规与偏导缩并后的表达式，结果导数指标为 `up<mu>`，临时求和指标为 `nu`。逆度规必须具有两个上指标，临时指标不可与原场指标重名。该表达式可继续求导、改名或传给 `compile`；带坐标的 `partial_up<mu, nu, DiffScheme::Central4>(field, inverse, x, h)` 立即求值，并将同一个 `h` 传给整棵树。四种差分策略均在编译期选择，不提供接收运行时 `DiffScheme` 实参的重载。
 
 [`examples/metric_expression.cpp`](examples/metric_expression.cpp) 提供可直接运行的 Schwarzschild 四项连乘，并打印结果类型、完整展开的树类型和外层表达式类型：
 
@@ -322,13 +333,13 @@ static_assert(decltype(graph)::use_count<2> == 2);
 
 `compile` 解开 `IndexedExpr`，在递归前先查询整棵当前子树，未命中才后序编译孩子，生成 `ExprGraph<Output, DAGNode<Id, Operation, Inputs...>...>`。输出描述保留原来的指标及根节点的轴映射；孩子先于父节点分配 ID。图类型包含全部操作、位置计划和依赖，图对象不保留原表达式或指向它的指针，建图不会调用场函数。
 
-建图使用不可变的编译期 `TypeHashTable`：类型签名的 FNV-1a 哈希选择桶，桶内通过完整类型相等判断解决碰撞。表内有两类键：`SourceKey<规范子树类型>` 映射到完整 `NodeRef<Id, Layout>`；`NodeKey<操作, 孩子ID...>` 映射到节点 ID。前者在递归之前查询，不依赖孩子 ID；后者在递归之后查询。`compile<1>(A)` 可强制所有键进入同一桶，仍得到相同的图类型。哈希与 ID 只用于当前编译和图内部，不作为跨编译器的持久标识。
+建图使用不可变的编译期 `TypeHashTable`：组合子类型哈希和整数参数，无法结构分解的类型使用签名的 FNV-1a 哈希，桶内通过完整类型相等判断解决碰撞。一般有两类键：`SourceKey<规范子树类型>` 映射到完整 `NodeRef<Id, Layout>`；`NodeKey<操作, 孩子ID...>` 映射到带规范布局的节点引用（其 `value` 即节点 ID）。前者在递归之前查询，不依赖孩子 ID；后者在递归之后查询。场叶子没有孩子，其源码查重直接共用 `NodeKey<FieldOp<...>>` 条目，省掉重复索引。`compile<1>(A)` 可强制所有键进入同一桶，仍得到相同的图类型。哈希与 ID 只用于当前编译和图内部，不作为跨编译器的持久标识。
 
 入口按左右原始子树的编译器类型签名（`__PRETTY_FUNCTION__` / `__FUNCSIG__`）字典序选择方向，交换时同步转置缩并轴对，并记录自由轴顺序变化。它只规范化当前一层，不递归规范化孩子；命中后通过独立的模板特化直接返回已有引用，不实例化孩子的编译路径。未命中则继续编译，结束时登记规范子树到图存储的轴映射。原样重复及当前层左右相反的子树均可提前命中；更深层的等价变形仍由后序查重处理。长类型签名的生成和比较仍有编译成本。
 
 递归后的缩并再把操作类型和孩子 ID 组成键查重，此时孩子按 ID 升序排列；相同 ID 时比较缩并轴对以确定方向。交换左右时同步转置轴对，并把原输出顺序记录为 `index<...>` 映射。父节点把孩子映射直接吸收到自己的缩并轴号中，不创建中间置换数组；只有根节点输出顺序与数学表达式不同时，才调用 `permute_components` 恢复顺序。这里不排序求和轴对、不改变缩并的结合方式，也不识别任意代数等价关系。
 
-使用次数按去重后的 DAG 边数统计，同一父节点两次读取同一孩子计为两次；返回根结果计为一次。运行时沿依赖递归求值，仅为使用次数大于一的节点生成 `tuple<optional<结果数组>...>` 缓存，单次使用结果通过临时值交给父节点。缓存每次 `eval` 重新创建，不跨坐标保留；第一版共享缓存持续到本次求值结束，尚未按最后一次使用提前释放。
+使用次数按去重后的 DAG 边数统计，同一父节点两次读取同一孩子计为两次；返回根结果计为一次。运行时沿依赖递归求值，仅为使用次数大于一的节点生成 `optional<结果数组>` 缓存槽，各槽通过编号基类平铺存储，避免大 `std::tuple` 的递归索引实例化。单次使用结果通过临时值交给父节点。缓存每次 `eval` 重新创建，不跨坐标保留；第一版共享缓存持续到本次求值结束，尚未按最后一次使用提前释放。
 
 偏导在编译时通过现有采样位置模板降为场采样、有理常数缩放、加法、除以运行时步长和四方向拼装。执行图不保留黑盒的偏导递归调用；嵌套偏导的整数位移在类型里相加，相同场函数在相同绝对 offset 的采样进入同一个图节点。仅 offset 相同不足以合并不同的函数或运算。不同求值调用仍使用各自的新缓存。
 
@@ -350,7 +361,9 @@ python tools/summarize_k_bench.py
 
 报告保存为 `outputs/k_benchmark_report.md`，原始数据保存为 `k_bench_*.json`、`k_build_*.json`。图数据 `k_structure_*.json` 从实际 C++ 类型导出，分别包含数学树、保留偏导的数学类型 DAG，以及偏导降级后的执行 DAG。`tools/render_k_graph.py --output <HTML片段路径>` 生成可缩放的圆圈节点图，并在 `outputs` 保存对应 SVG；执行树由实际执行 DAG 沿每条路径分别展开，可逐层检查。数学树与展开执行树的节点数使用不同口径，图中分别标明。
 
-哈希桶和节点列表使用纯类型列表；哈希插入仅实例化被选中的桶。使用次数和缓存槽位通过一次编译期数组遍历确定，缓存类型仅拼接共享结果，避免为元数据实例化运行时 tuple 拼接的模板设施。这些调整不改变图节点和数值执行顺序。
+哈希桶内部使用纯类型列表；桶目录采用共享未修改分支的类型二叉树，每次插入只重建到目标桶的路径。建图节点存储使用 32 个一组的尾部类型列表和不可变的已完成块，新节点只扩展尾块，发布 `ExprGraph` 时才摊平为完整节点包；内部的纯 `type_list` 构造路径仍支持。复合类型的哈希组合已缓存的子类型哈希；`NodeKey` 直接组合操作哈希与整数孩子 ID，避免为每组 ID 重新扫描类型字符串。左右排序仍使用类型字符串，哈希碰撞仍比较完整键类型，入口命中仍跳过子树编译。使用次数和缓存槽位通过一次编译期数组遍历确定，缓存类型仅拼接共享结果。这些调整不改变最终图类型和数值执行顺序。`python tools/bench_graph_compile.py --output outputs/graph_compile.json` 可测量不实例化求值器的 K 建图探针（包含小型驱动程序的代码生成与链接）；比较前后报告的 `graph_type_sha256` 可核对完整图类型。
+
+加法与方向拼装的逐分量数值内核按标量和轴布局共享模板实例，避免随节点 ID、采样 offset 和求值 Context 重复展开。它们保留输入求值顺序和逐分量计算方式。`python tools/bench_graph_kernels.py --label NAME` 使用 `tools/profile_compile.py` 已导出的 K Central2/4 图，测量求值测试程序的编译时间和运行性能；结果写入 `outputs/kernel_compile/NAME/`，不重新建图。首次优化的前后测量见 `outputs/kernel_compile/summary.md`。
 
 ## 验证
 
@@ -362,7 +375,7 @@ python tests/run_tests.py
 python tests/run_tests.py --compiler clang++
 ```
 
-检查包含矩阵乘法、交错多轴缩并、含 `contractpair<3, 3>` 的四阶张量、完全缩并、外积及零阶输入的独立分量循环对照；另有仅依赖执行层的数组测试和 Schwarzschild 曲率示例。表达式测试检查编译期树类型、改名后的子树类型相同、建树不求值、非对角度规连乘、外积、零阶场乘法、全缩并，以及重复子树的调用次数。offset 测试覆盖四维正负偏移、默认零位置、向叶子传播、整树重新展开、改名保留位置和多层树只平移一次。偏导测试覆盖四种策略的多项式解析导数、完整采样坐标与调用次数、嵌套/混合偏导、对含偏导的乘积继续求导，以及 callable 接口和导数指标抬升。非法同变异性缩并、改名改变上下位置、越界轴、左右重复轴、数组大小错误、缩并节点位置不一致、重复导数指标和运行时差分策略必须编译失败，并检查对应诊断。
+检查包含矩阵乘法、交错多轴缩并、含 `contractpair<3, 3>` 的四阶张量、完全缩并、外积及零阶输入的独立分量循环对照；另有仅依赖执行层的数组测试和 Schwarzschild 曲率示例。表达式测试检查编译期树类型、改名后的子树类型相同、建树不求值、非对角度规连乘、外积、零阶场乘法、全缩并，以及重复子树的调用次数。offset 测试覆盖四维正负偏移、默认零位置、向叶子传播、整树重新展开、改名保留位置和多层树只平移一次。偏导测试覆盖四种策略的多项式解析导数、完整采样坐标与调用次数、嵌套/混合偏导、对含偏导的乘积继续求导，以及导数指标抬升的表达式组合、非对角逆度规和 DAG 对照。非法同变异性缩并、改名改变上下位置、越界轴、左右重复轴、数组大小错误、缩并节点位置不一致、重复导数指标和运行时差分策略必须编译失败，并检查对应诊断。
 
 ## 文件导览
 
@@ -377,6 +390,5 @@ python tests/run_tests.py --compiler clang++
 - `contraction_and_arithmetic.hpp`：连接缩并的两层接口，以及算术、改名与迹。
 - `symm_asymm.hpp`：对称化、反对称化的位置计划、指标分析、数组执行与 Tensor 入口。
 - `permutation.hpp`：完整零起始轴置换计划、固定槽位复制执行器与 Tensor 入口。
-- `field_wrapper.hpp`：callable 张量场封装。
-- `num_deriv.hpp`：编译期差分策略、步长检查和 callable 数值偏导接口。
+- `num_deriv.hpp`：坐标类型、编译期差分策略与权重，以及共享的步长检查。
 - `main.cpp`：Schwarzschild/Kretschmann 端到端示例。

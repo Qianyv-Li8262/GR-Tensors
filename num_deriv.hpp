@@ -1,12 +1,10 @@
 #pragma once
-#include "contraction_and_arithmetic.hpp"
+#include "tensor_class.hpp"
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cmath>
 #include <limits>
-#include <type_traits>
-#include <utility>
 
 enum class DiffScheme { Central2, Central4, Central6, Central8 };
 
@@ -58,53 +56,3 @@ void check_step(const Coordinate& x, double h) {
 }
 
 } // namespace derivative_detail
-
-// Opaque callable fields retain direct evaluation, with compile-time strategy selection.
-// Result metadata is obtained in an unevaluated context: no extra center sample.
-namespace derivative_detail {
-
-template <typename DerivLetter, DiffScheme Scheme, typename F, typename CoordLetter,
-          typename Scalar, typename... Indices, std::size_t... I>
-auto evaluate_callable(const F& field, const coord<CoordLetter>& x, double h,
-                       const Tensor<Scalar, Indices...>*, std::index_sequence<I...>) {
-    using result_type = Tensor<Scalar, dn<DerivLetter>, Indices...>;
-    using stencil = derivative_stencil<Scheme>;
-    constexpr std::size_t size = pow4(sizeof...(Indices));
-    result_type result;
-    for (std::size_t axis = 0; axis < 4; ++axis) {
-        auto accumulate = [&](auto position) {
-            constexpr std::size_t i = decltype(position)::value;
-            auto sample = x;
-            sample(axis) += stencil::offsets[i] * h;
-            const auto values = field.eval(sample);
-            for (std::size_t j = 0; j < size; ++j) {
-                constexpr double weight = static_cast<double>(stencil::weights[i]) / stencil::denominator;
-                result.data[axis * size + j] += weight * values.data[j];
-            }
-        };
-        (accumulate(std::integral_constant<std::size_t, I>{}), ...);
-        for (std::size_t j = 0; j < size; ++j) {
-            result.data[axis * size + j] /= h;
-        }
-    }
-    return result;
-}
-
-} // namespace derivative_detail
-
-template <typename DerivLetter, DiffScheme Scheme = DiffScheme::Central8, typename CoordLetter, typename F>
-auto partial(const F& field, const coord<CoordLetter>& x, double h = 1e-2) {
-    derivative_detail::check_step(x, h);
-    using source_type = std::decay_t<decltype(field.eval(x))>;
-    return derivative_detail::evaluate_callable<DerivLetter, Scheme>(
-        field, x, h, static_cast<const source_type*>(nullptr),
-        std::make_index_sequence<derivative_stencil<Scheme>::offsets.size()>{});
-}
-
-template <typename UpLetter, typename DummyLetter, DiffScheme Scheme = DiffScheme::Central8,
-          typename CoordLetter, typename F, typename InvMetricFunc>
-auto partial_up(const F& field, const InvMetricFunc& inv_metric, const coord<CoordLetter>& x, double h = 1e-2) {
-    auto lower = partial<DummyLetter, Scheme>(field, x, h);
-    auto ginv = rename<up<UpLetter>, up<DummyLetter>>(inv_metric.eval(x));
-    return ginv * lower;
-}

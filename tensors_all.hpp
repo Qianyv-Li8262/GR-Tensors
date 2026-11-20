@@ -2,7 +2,7 @@
 #include "Index_and_variance.hpp"
 #include "contraction_and_arithmetic.hpp"
 #include "diff_forms.hpp"
-#include "field_wrapper.hpp"
+#include "tensor_expression.hpp"
 #include "expression_graph.hpp"
 #include "num_deriv.hpp"
 #include "permutation.hpp"

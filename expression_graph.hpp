@@ -38,6 +38,44 @@ constexpr std::uint64_t type_hash_value() {
 template <typename T>
 struct TypeHash : std::integral_constant<std::uint64_t, type_hash_value<T>()> {};
 
+constexpr std::uint64_t mix_hash(std::uint64_t hash, std::uint64_t value) {
+    return hash ^ (value + 0x9e3779b97f4a7c15ull + (hash << 6) + (hash >> 2));
+}
+
+template <typename... Values>
+constexpr std::uint64_t combine_hashes(std::uint64_t hash, Values... values) {
+    ((hash = mix_hash(hash, values)), ...);
+    return hash;
+}
+
+template <template <typename...> class Template>
+struct HashTemplateTag {};
+
+// Cache hashes per constituent type rather than rescanning the entire nested
+// SourceKey spelling at every level. Tags preserve the template's identity;
+// equality still compares full key types, including on a hash collision.
+template <template <typename...> class Template, typename... Args>
+struct TypeHash<Template<Args...>> : std::integral_constant<std::uint64_t,
+    combine_hashes(type_hash_value<HashTemplateTag<Template>>(), TypeHash<Args>::value...)> {};
+
+// These expression templates have a non-type scheme argument, so they do not
+// match the all-type template case above. FieldExpr remains an opaque, short
+// function/offset signature; hashing never compiles or evaluates its function.
+template <DiffScheme Scheme>
+struct PartialHashTag {};
+
+template <DiffScheme Scheme>
+struct StencilHashTag {};
+
+template <typename Node, DiffScheme Scheme, typename Offset>
+struct TypeHash<PartialExpr<Node, Scheme, Offset>> : std::integral_constant<std::uint64_t,
+    combine_hashes(type_hash_value<PartialHashTag<Scheme>>(), TypeHash<Node>::value, TypeHash<Offset>::value)> {};
+
+template <DiffScheme Scheme, typename Offset, typename... Samples>
+struct TypeHash<StencilSumExpr<Scheme, Offset, Samples...>> : std::integral_constant<std::uint64_t,
+    combine_hashes(type_hash_value<StencilHashTag<Scheme>>(), TypeHash<Offset>::value,
+                   TypeHash<Samples>::value...)> {};
+
 struct MissingEntry : std::integral_constant<std::size_t, not_found> {};
 
 template <typename Key, typename Value>
@@ -69,16 +107,23 @@ struct bucket_find<Key, type_list<Head, Tail...>>
                          HashLookup<typename Head::mapped_type>,
                          bucket_find<Key, type_list<Tail...>>> {};
 
-template <std::size_t>
-using empty_bucket = type_list<>;
+// A persistent directory shares untouched branches between table versions.
+// Insertion rebuilds one root-to-bucket path instead of expanding every bucket.
+template <typename Left, typename Right>
+struct BucketBranch {};
 
-template <typename Sequence>
-struct empty_buckets;
-
-template <std::size_t... I>
-struct empty_buckets<std::index_sequence<I...>> {
-    using type = type_list<empty_bucket<I>...>;
+template <std::size_t Count>
+struct empty_buckets {
+    using type = BucketBranch<typename empty_buckets<Count / 2>::type,
+                              typename empty_buckets<Count - Count / 2>::type>;
 };
+
+template <>
+struct empty_buckets<1> { using type = type_list<>; };
+
+// Let TypeHashTable's public diagnostic handle zero instead of recursing here.
+template <>
+struct empty_buckets<0> : empty_buckets<1> {};
 
 template <std::size_t I, typename Buckets>
 struct list_at;
@@ -92,14 +137,42 @@ struct list_at<I, type_list<Buckets...>> {
 #endif
 };
 
-// Only instantiate append_back for the selected bucket. An eager
-// conditional_t would generate discarded appended types for every bucket.
-template <bool Selected, typename Bucket, typename Entry>
-struct insert_bucket { using type = Bucket; };
+template <std::size_t Index, std::size_t Count, typename Tree>
+struct bucket_at;
 
-template <typename Bucket, typename Entry>
-struct insert_bucket<true, Bucket, Entry> {
-    using type = typename append_back<Bucket, Entry>::result;
+template <std::size_t Index, std::size_t Count, typename Left, typename Right>
+struct bucket_at<Index, Count, BucketBranch<Left, Right>> : std::conditional_t<
+    (Index < Count / 2), bucket_at<Index, Count / 2, Left>,
+    bucket_at<Index - Count / 2, Count - Count / 2, Right>> {};
+
+template <typename... Entries>
+struct bucket_at<0, 1, type_list<Entries...>> { using type = type_list<Entries...>; };
+
+template <std::size_t Index, std::size_t Count, typename Tree, typename Entry>
+struct bucket_insert;
+
+template <std::size_t Index, std::size_t Count, typename Left, typename Right,
+          typename Entry, bool GoLeft = (Index < Count / 2)>
+struct insert_branch;
+
+template <std::size_t Index, std::size_t Count, typename Left, typename Right, typename Entry>
+struct insert_branch<Index, Count, Left, Right, Entry, true> {
+    using type = BucketBranch<typename bucket_insert<Index, Count / 2, Left, Entry>::type, Right>;
+};
+
+template <std::size_t Index, std::size_t Count, typename Left, typename Right, typename Entry>
+struct insert_branch<Index, Count, Left, Right, Entry, false> {
+    using type = BucketBranch<Left,
+        typename bucket_insert<Index - Count / 2, Count - Count / 2, Right, Entry>::type>;
+};
+
+template <std::size_t Index, std::size_t Count, typename Left, typename Right, typename Entry>
+struct bucket_insert<Index, Count, BucketBranch<Left, Right>, Entry>
+    : insert_branch<Index, Count, Left, Right, Entry> {};
+
+template <typename... Entries, typename Entry>
+struct bucket_insert<0, 1, type_list<Entries...>, Entry> {
+    using type = type_list<Entries..., Entry>;
 };
 
 } // namespace dag_detail
@@ -107,7 +180,7 @@ struct insert_bucket<true, Bucket, Entry> {
 // Immutable, compile-time hash table. All buckets, entries and values are types.
 template <std::size_t BucketCount = 64,
           template <typename> class Hasher = dag_detail::TypeHash,
-          typename Buckets = typename dag_detail::empty_buckets<std::make_index_sequence<BucketCount>>::type>
+          typename Buckets = typename dag_detail::empty_buckets<BucketCount>::type>
 struct TypeHashTable {
     static_assert(BucketCount > 0, "DAG hash table requires at least one bucket");
     static constexpr std::size_t bucket_count = BucketCount;
@@ -116,13 +189,17 @@ struct TypeHashTable {
     static constexpr std::size_t bucket_index = Hasher<Key>::value % BucketCount;
 
     template <typename Key>
-    using find = dag_detail::bucket_find<Key, typename dag_detail::list_at<bucket_index<Key>, Buckets>::type>;
+    using find = dag_detail::bucket_find<Key,
+        typename dag_detail::bucket_at<bucket_index<Key>, BucketCount, Buckets>::type>;
 
 private:
-    template <typename Key, typename Value, std::size_t... I>
-    static auto insert_impl(std::index_sequence<I...>) -> TypeHashTable<BucketCount, Hasher,
-        type_list<typename dag_detail::insert_bucket<I == bucket_index<Key>,
-            typename dag_detail::list_at<I, Buckets>::type, dag_detail::HashEntry<Key, Value>>::type...>>;
+    template <typename Key, typename Value>
+    struct inserted {
+        using type = TypeHashTable<BucketCount, Hasher, typename dag_detail::bucket_insert<
+            bucket_index<Key>, BucketCount, Buckets, dag_detail::HashEntry<Key, Value>>::type>;
+    };
+
+    struct unchanged { using type = TypeHashTable; };
 
 public:
     template <typename Key, typename Value>
@@ -130,8 +207,7 @@ public:
         static constexpr bool missing = std::is_same_v<typename find<Key>::type, dag_detail::MissingEntry>;
         static_assert(missing || std::is_same_v<typename find<Key>::type, Value>,
                       "cannot assign a second value to the same DAG key");
-        using type = std::conditional_t<missing,
-            decltype(insert_impl<Key, Value>(std::make_index_sequence<BucketCount>{})), TypeHashTable>;
+        using type = typename std::conditional_t<missing, inserted<Key, Value>, unchanged>::type;
     };
 
     template <typename Key, std::size_t Id>
@@ -149,7 +225,7 @@ using identity = decltype(identity_layout(std::make_index_sequence<Rank>{}));
 // A reference is a node ID plus a logical-output-axis -> stored-axis mapping.
 // The mapping is metadata: it never materializes a permuted intermediate array.
 template <std::size_t Id, typename Layout>
-struct NodeRef {
+struct NodeRef : std::integral_constant<std::size_t, Id> {
     static constexpr std::size_t id = Id;
     using layout = Layout;
 };
@@ -189,6 +265,12 @@ struct ContractOp {
 
 template <typename Operation, std::size_t... Inputs>
 struct NodeKey {};
+
+// IDs are already integers: do not format and hash a fresh compiler signature
+// for every operation/ID combination. Reuse the operation's cached type hash.
+template <typename Operation, std::size_t... Inputs>
+struct TypeHash<NodeKey<Operation, Inputs...>> : std::integral_constant<std::uint64_t,
+    combine_hashes(TypeHash<Operation>::value, static_cast<std::uint64_t>(Inputs)...)> {};
 
 } // namespace dag_detail
 
@@ -337,6 +419,15 @@ struct normalize_source {
     using layout = identity<Node::rank>;
 };
 
+// A field is already a primitive operation: its source key can share the
+// executable-node entry, without maintaining a second index for the same leaf.
+template <auto Function, typename Offset>
+struct normalize_source<FieldExpr<Function, Offset>> {
+    using node = FieldExpr<Function, Offset>;
+    using key = NodeKey<FieldOp<Function, Offset>>;
+    using layout = identity<node::rank>;
+};
+
 template <typename L, typename R, typename Plan, typename Offset>
 struct normalize_source<ContractExpr<L, R, Plan, Offset>> {
     static constexpr bool swapped = type_less<R, L>() ||
@@ -349,6 +440,52 @@ struct normalize_source<ContractExpr<L, R, Plan, Offset>> {
     using key = SourceKey<node>;
     using layout = typename normalized::layout;
 };
+
+// Append a bounded tail instead of rebuilding the complete node parameter pack
+// in every intermediate BuildState. Flatten only when publishing ExprGraph.
+struct EmptyNodeChunks {};
+
+template <typename Previous, typename Chunk>
+struct NodeChunk {};
+
+template <typename Chunks = EmptyNodeChunks, typename Tail = type_list<>, std::size_t Size = 0>
+struct NodeStore { static constexpr std::size_t size = Size; };
+
+template <typename Nodes>
+struct stored_node_count : list_size<Nodes> {};
+
+template <typename Chunks, typename Tail, std::size_t Size>
+struct stored_node_count<NodeStore<Chunks, Tail, Size>> : std::integral_constant<std::size_t, Size> {};
+
+template <typename Nodes, typename Node>
+struct append_node { using type = typename append_back<Nodes, Node>::result; };
+
+template <typename Chunks, typename Tail, std::size_t Size, typename Node, bool Full>
+struct append_stored_node;
+
+template <typename Chunks, typename... Tail, std::size_t Size, typename Node>
+struct append_stored_node<Chunks, type_list<Tail...>, Size, Node, false> {
+    using type = NodeStore<Chunks, type_list<Tail..., Node>, Size + 1>;
+};
+
+template <typename Chunks, typename Tail, std::size_t Size, typename Node>
+struct append_stored_node<Chunks, Tail, Size, Node, true> {
+    using type = NodeStore<NodeChunk<Chunks, Tail>, type_list<Node>, Size + 1>;
+};
+
+template <typename Chunks, typename... Tail, std::size_t Size, typename Node>
+struct append_node<NodeStore<Chunks, type_list<Tail...>, Size>, Node>
+    : append_stored_node<Chunks, type_list<Tail...>, Size, Node, sizeof...(Tail) == 32> {};
+
+template <typename Chunks, typename Tail>
+struct flatten_node_chunks;
+
+template <typename Tail>
+struct flatten_node_chunks<EmptyNodeChunks, Tail> { using type = Tail; };
+
+template <typename Previous, typename... Chunk, typename... Tail>
+struct flatten_node_chunks<NodeChunk<Previous, type_list<Chunk...>>, type_list<Tail...>>
+    : flatten_node_chunks<Previous, type_list<Chunk..., Tail...>> {};
 
 template <typename Nodes, typename Table>
 struct BuildState {
@@ -368,11 +505,12 @@ struct intern_impl<Operation, State, std::index_sequence<Inputs...>, true> {
 
 template <typename Operation, typename State, std::size_t... Inputs>
 struct intern_impl<Operation, State, std::index_sequence<Inputs...>, false> {
-    static constexpr std::size_t id = list_size<typename State::nodes>::value;
+    static constexpr std::size_t id = stored_node_count<typename State::nodes>::value;
     using node = DAGNode<id, Operation, Inputs...>;
     using old_table = typename State::table;
-    using table = typename old_table::template insert<NodeKey<Operation, Inputs...>, id>::type;
-    using state = BuildState<typename append_back<typename State::nodes, node>::result, table>;
+    using table = typename old_table::template bind<NodeKey<Operation, Inputs...>,
+        NodeRef<id, identity<Operation::rank>>>::type;
+    using state = BuildState<typename append_node<typename State::nodes, node>::type, table>;
 };
 
 template <typename Operation, typename State, std::size_t... Inputs>
@@ -635,7 +773,7 @@ struct Evaluation {
     decltype(auto) get() {
         using node = typename Graph::template node<Id>;
         if constexpr (Graph::template use_count<Id> > 1) {
-            auto& slot = std::get<Graph::template cache_index<Id>>(cache);
+            auto& slot = cache.template get<Graph::template cache_index<Id>>();
             if (!slot) slot.emplace(node::execute(*this));
             return static_cast<const typename node::result_type&>(*slot);
         } else {
@@ -657,23 +795,52 @@ constexpr auto count_uses() {
     return result;
 }
 
-// Join type lists without asking std::tuple_cat to instantiate runtime tuple
-// machinery for every empty/singleton candidate. Eight-way batches bound depth.
+// Distinct, directly addressable bases avoid the recursive tuple_element/get
+// instantiations of a large std::tuple (Bach has 1,211 shared results).
+template <std::size_t Id, typename T>
+struct CacheSlot {
+    T value{};
+};
+
+template <typename Types, typename Indices>
+struct CacheStorage;
+
+template <typename... T, std::size_t... I>
+struct CacheStorage<type_list<T...>, std::index_sequence<I...>> : CacheSlot<I, T>... {
+    static constexpr std::size_t size = sizeof...(T);
+
+    template <std::size_t Id>
+    using slot_type = typename list_at<Id, type_list<T...>>::type;
+
+    template <std::size_t Id>
+    slot_type<Id>& get() {
+        return static_cast<CacheSlot<Id, slot_type<Id>>&>(*this).value;
+    }
+
+    template <std::size_t Id>
+    const slot_type<Id>& get() const {
+        return static_cast<const CacheSlot<Id, slot_type<Id>>&>(*this).value;
+    }
+};
+
+// Join only the shared-result types. Eight-way batches bound template depth.
 template <typename... Lists>
-struct cache_tuple;
+struct cache_storage;
 
 template <typename... T>
-struct cache_tuple<type_list<T...>> { using type = std::tuple<T...>; };
+struct cache_storage<type_list<T...>> {
+    using type = CacheStorage<type_list<T...>, std::make_index_sequence<sizeof...(T)>>;
+};
 
 template <typename... A, typename... B, typename... Rest>
-struct cache_tuple<type_list<A...>, type_list<B...>, Rest...>
-    : cache_tuple<type_list<A..., B...>, Rest...> {};
+struct cache_storage<type_list<A...>, type_list<B...>, Rest...>
+    : cache_storage<type_list<A..., B...>, Rest...> {};
 
 template <typename... A, typename... B, typename... C, typename... D,
           typename... E, typename... F, typename... G, typename... H, typename... Rest>
-struct cache_tuple<type_list<A...>, type_list<B...>, type_list<C...>, type_list<D...>,
+struct cache_storage<type_list<A...>, type_list<B...>, type_list<C...>, type_list<D...>,
                    type_list<E...>, type_list<F...>, type_list<G...>, type_list<H...>, Rest...>
-    : cache_tuple<type_list<A..., B..., C..., D..., E..., F..., G..., H...>, Rest...> {};
+    : cache_storage<type_list<A..., B..., C..., D..., E..., F..., G..., H...>, Rest...> {};
 
 } // namespace dag_detail
 
@@ -714,9 +881,9 @@ struct ExprGraph {
     template <std::size_t Id>
     static constexpr std::size_t cache_index = cache_indices[Id];
 
-    using cache_type = typename dag_detail::cache_tuple<type_list<>, std::conditional_t<
+    using cache_type = typename dag_detail::cache_storage<type_list<>, std::conditional_t<
         (use_count<Nodes::id> > 1), type_list<std::optional<typename Nodes::result_type>>, type_list<>>...>::type;
-    static constexpr std::size_t cache_count = std::tuple_size<cache_type>::value;
+    static constexpr std::size_t cache_count = cache_type::size;
 
     template <typename Coordinate>
     result_type eval(const Coordinate& x, double h = 1e-2) const {
@@ -744,13 +911,17 @@ struct make_graph<Output, type_list<Nodes...>> {
     using type = ExprGraph<Output, Nodes...>;
 };
 
+template <typename Output, typename Chunks, typename Tail, std::size_t Size>
+struct make_graph<Output, NodeStore<Chunks, Tail, Size>>
+    : make_graph<Output, typename flatten_node_chunks<Chunks, Tail>::type> {};
+
 } // namespace dag_detail
 
 // Current supported nodes encode all their data in types. No expression object
 // or pointer into the source tree is retained; graphs may outlive that tree.
 template <std::size_t BucketCount = 64, typename Node, typename... Indices>
 constexpr auto compile(const IndexedExpr<Node, Indices...>&) {
-    using initial = dag_detail::BuildState<type_list<>, TypeHashTable<BucketCount>>;
+    using initial = dag_detail::BuildState<dag_detail::NodeStore<>, TypeHashTable<BucketCount>>;
     using built = dag_detail::compile_node<Node, initial>;
     using output = dag_detail::GraphOutput<Tensor<typename Node::scalar_type, Indices...>, typename built::ref>;
     using graph = typename dag_detail::make_graph<output, typename built::state::nodes>::type;

@@ -38,6 +38,18 @@ auto scalar(const coord<mu>& x) {
 
 auto other_scalar(const coord<mu>& x) { return Tensor<double>(3 - x(1)); }
 
+auto raising_polynomial(const coord<mu>& x) {
+    return Tensor<double>(x(0) * x(0) + 3 * x(2) * x(3));
+}
+
+auto raising_inverse(const coord<mu>& x) {
+    Tensor<double, up<a>, up<b>> value;
+    for (int i = 0; i < 4; ++i)
+        for (int j = 0; j < 4; ++j)
+            value(i, j) = (i == j ? 2 + x(1) : 0) + 0.25 * (i + 1) * (j + 1);
+    return value;
+}
+
 auto rank_three(const coord<mu>& x) {
     Tensor<double, up<a>, dn<b>, up<c>> value;
     for (int i = 0; i < 4; ++i)
@@ -71,6 +83,9 @@ auto contract(L left, R right) {
     return ContractExpr<L, R, Plan, typename L::point_offset>{left, right};
 }
 
+template <typename Key>
+struct ValueHasher : std::integral_constant<std::size_t, Key::value> {};
+
 void check_hash_table() {
     // One bucket forces every distinct key to collide.
     using Empty = TypeHashTable<1>;
@@ -87,7 +102,52 @@ void check_hash_table() {
     using Typed = typename Second::bind<float, Ref>::type;
     static_assert(std::is_same_v<typename Typed::find<float>::type, Ref>);
     static_assert(Typed::find<int>::value == 7 && Typed::find<double>::value == 19);
+
+    // Exercise both directory branches, an uneven bucket count, collisions and
+    // persistence. One-bucket tests alone cannot catch a broken directory path.
+    using K0 = std::integral_constant<std::size_t, 0>;
+    using K1 = std::integral_constant<std::size_t, 1>;
+    using K2 = std::integral_constant<std::size_t, 2>;
+    using K3 = std::integral_constant<std::size_t, 3>;
+    using Three = TypeHashTable<3, ValueHasher>;
+    using T0 = typename Three::insert<K0, 10>::type;
+    using T1 = typename T0::insert<K1, 11>::type;
+    using T2 = typename T1::insert<K2, 12>::type;
+    using T3 = typename T2::insert<K3, 13>::type;
+    static_assert(T3::find<K0>::value == 10 && T3::find<K1>::value == 11 &&
+                  T3::find<K2>::value == 12 && T3::find<K3>::value == 13);
+    static_assert(T0::find<K1>::value == dag_detail::not_found &&
+                  T2::find<K3>::value == dag_detail::not_found);
+    static_assert(std::is_same_v<typename T3::insert<K2, 12>::type, T3>);
 }
+
+template <std::size_t Count>
+struct filled_node_store {
+    using type = typename dag_detail::append_node<typename filled_node_store<Count - 1>::type,
+        std::integral_constant<std::size_t, Count - 1>>::type;
+};
+
+template <>
+struct filled_node_store<0> { using type = dag_detail::NodeStore<>; };
+
+template <std::size_t... I>
+auto expected_node_store(std::index_sequence<I...>) -> type_list<std::integral_constant<std::size_t, I>...>;
+
+template <typename Chunks, typename Tail, std::size_t Size>
+auto flatten_store(dag_detail::NodeStore<Chunks, Tail, Size>)
+    -> typename dag_detail::flatten_node_chunks<Chunks, Tail>::type;
+
+template <std::size_t Count>
+constexpr bool node_store_matches() {
+    using Store = typename filled_node_store<Count>::type;
+    return dag_detail::stored_node_count<Store>::value == Count &&
+        std::is_same_v<decltype(flatten_store(Store{})),
+                       decltype(expected_node_store(std::make_index_sequence<Count>{}))>;
+}
+
+static_assert(node_store_matches<0>() && node_store_matches<1>() && node_store_matches<32>() &&
+              node_store_matches<33>() && node_store_matches<64>() && node_store_matches<65>() &&
+              node_store_matches<97>(), "chunk publication must preserve exact insertion order and size");
 
 // This node has shape metadata but no build_node specialization. A successful
 // cached-parent lookup must compile without trying to build this child.
@@ -102,6 +162,12 @@ void check_source_lookup(const coord<mu>& x) {
     using Initial = BuildState<type_list<>, TypeHashTable<1>>;
     using F = FieldExpr<&f>;
     using G = FieldExpr<&g>;
+    using Leaf = compile_node<F, Initial>;
+    using Primitive = intern<FieldOp<&f, offset<>>, Initial>;
+    using RepeatedLeaf = compile_node<F, typename Leaf::state>;
+    static_assert(std::is_same_v<typename Leaf::state, typename Primitive::state>,
+                  "leaf source interning must reuse the primitive entry without another table insertion");
+    static_assert(RepeatedLeaf::source_hit && std::is_same_v<typename RepeatedLeaf::state, typename Leaf::state>);
     using P = contraction_plan<2, 2, contractpair<1, 0>>;
     using PT = contraction_plan<2, 2, contractpair<0, 1>>;
     using FG = ContractExpr<F, G, P>;
@@ -181,7 +247,8 @@ void check_public_api(const coord<mu>& x) {
     static_assert(Graph::template use_count<0> == 1 && Graph::template use_count<1> == 1);
     static_assert(Graph::template use_count<2> == 2 && Graph::template use_count<3> == 1);
     static_assert(Graph::cache_count == 1);
-    static_assert(std::is_same_v<typename Graph::cache_type, std::tuple<std::optional<std::array<double, 1>>>>);
+    static_assert(std::is_same_v<typename Graph::cache_type::template slot_type<0>,
+                                 std::optional<std::array<double, 1>>>);
     check(f_calls == 0 && g_calls == 0, "compile must not call fields");
     const auto direct = A.eval(x);
     check(f_calls == 2 && g_calls == 2, "direct engine should retain recursive evaluation");
@@ -326,6 +393,69 @@ void check_normalization(const coord<mu>& x) {
     compare(compile(unequal_root).eval(x), unequal_root.eval(x));
 }
 
+template <std::size_t>
+using RepeatedCacheSlot = std::optional<std::array<double, 1>>;
+
+template <std::size_t... I>
+auto large_cache_type(std::index_sequence<I...>) -> dag_detail::CacheStorage<
+    type_list<RepeatedCacheSlot<I>..., std::optional<std::array<double, 16>>>,
+    std::make_index_sequence<sizeof...(I) + 1>>;
+
+void check_large_cache() {
+    // Exceed Bach's shared-node count, including repeated types and a different
+    // final type. High-index access must not require a recursive std::tuple.
+    using Cache = decltype(large_cache_type(std::make_index_sequence<1211>{}));
+    static_assert(Cache::size == 1212);
+    static_assert(std::is_same_v<Cache::slot_type<1211>, std::optional<std::array<double, 16>>>);
+    Cache cache{};
+    check(!cache.get<0>() && !cache.get<610>() && !cache.get<1210>() && !cache.get<1211>(),
+          "large cache must start with empty slots");
+    cache.get<0>().emplace(std::array<double, 1>{2.0});
+    cache.get<610>().emplace(std::array<double, 1>{3.0});
+    cache.get<1210>().emplace(std::array<double, 1>{4.0});
+    cache.get<1211>().emplace();
+    (*cache.get<1211>())[15] = 5.0;
+    const auto& read_only = cache;
+    check((*read_only.get<0>())[0] == 2.0 && (*read_only.get<610>())[0] == 3.0 &&
+          (*read_only.get<1210>())[0] == 4.0 && (*read_only.get<1211>())[15] == 5.0,
+          "high-index slots of repeated and different types must be independent");
+    cache.get<610>().reset();
+    check(!cache.get<610>() && cache.get<0>() && cache.get<1210>(),
+          "resetting a cache slot must not reset another slot");
+}
+
+void check_raised_derivative(const coord<mu>& x) {
+    const auto field = make_field<&raising_polynomial>();
+    const auto inverse = make_field<&raising_inverse>();
+    const auto raised = partial_up<nu, mu, DiffScheme::Central4>(field, inverse);
+    static_assert(std::is_same_v<typename decltype(raised)::result_type, Tensor<double, up<nu>>>);
+    // A non-diagonal, coordinate-dependent inverse catches axis and sampling
+    // mistakes that an identity inverse cannot expose.
+    for (double h : {0.125, 0.0625}) {
+        auto point = x;
+        for (int sample = 0; sample < 2; ++sample) {
+            const double gradient[] = {2 * point(0), 0, 3 * point(3), 3 * point(2)};
+            Tensor<double, up<nu>> expected;
+            for (int i = 0; i < 4; ++i)
+                for (int j = 0; j < 4; ++j)
+                    expected(i) += ((i == j ? 2 + point(1) : 0) + 0.25 * (i + 1) * (j + 1)) * gradient[j];
+            compare(raised.eval(point, h), expected);
+            compare(compile(raised).eval(point, h), expected);
+            compare(partial_up<nu, mu, DiffScheme::Central4>(field, inverse, point, h), expected);
+            point(0) += 0.5;
+            point(1) += 0.25;
+        }
+        const auto shifted = expand_at<offset<1, -1, 0, 0>>(raised);
+        auto moved = x;
+        moved(0) += h;
+        moved(1) -= h;
+        compare(compile(shifted).eval(x, h), raised.eval(moved, h));
+        // The raising operation remains composable with another derivative.
+        const auto second = partial_field<rho, DiffScheme::Central2>(raised);
+        compare(compile(second).eval(x, h), second.eval(x, h));
+    }
+}
+
 void check_offsets(const coord<mu>& x) {
     const auto shifted = expand_at<offset<1, -2, 0, 3>>(
         make_field<&f>() * rename_field<up<b>, dn<a>>(make_field<&g>()));
@@ -349,7 +479,9 @@ int main() {
     check_hash_table();
     check_source_lookup(x);
     check_public_api(x);
+    check_large_cache();
     check_normalization(x);
+    check_raised_derivative(x);
     check_offsets(x);
     if (!failures) std::cout << "type DAG, collision handling, lazy layouts and selective caching passed\n";
     return failures ? 1 : 0;

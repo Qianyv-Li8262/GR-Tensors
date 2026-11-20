@@ -1,4 +1,4 @@
-#include "field_wrapper.hpp"
+#include "tensor_expression.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -258,24 +258,23 @@ void check_derivatives() {
         }
     }
 
-    const auto opaque = make_field([](const coord<mu>& point) { return polynomial_field(point); });
     derivative_calls = 0;
-    const auto legacy_value = partial<mu, DiffScheme::Central4>(opaque, x, h);
-    check(derivative_calls == 16, "opaque callable derivative must not add a result-type probe");
-    const auto wrapped = partial_field<mu, DiffScheme::Central4>(opaque, h).eval(x);
     const auto typed = partial<mu, DiffScheme::Central4>(field, x, h);
+    check(derivative_calls == 16, "typed derivative must not add a result-type probe");
     const auto shifted_typed = partial<mu, DiffScheme::Central4>(
         expand_at<offset<1, -1, 0, 0>>(field), x, h);
     const auto raised = partial_up<nu, mu, DiffScheme::Central4>(field, make_field<&identity_inverse>(), x, h);
+    const auto raised_expression = partial_up<nu, mu, DiffScheme::Central4>(field, make_field<&identity_inverse>());
+    static_assert(std::is_same_v<typename decltype(raised_expression)::result_type, Tensor<double, up<nu>>>);
+    const auto raised_value = raised_expression.eval(x, h);
     const double expected_gradient[] = {4 * std::pow(x(0), 3) + x(1) * x(2), x(0) * x(2), x(0) * x(1), 0};
     const double shifted_gradient[] = {4 * std::pow(x(0) + h, 3) + (x(1) - h) * x(2),
                                        (x(0) + h) * x(2), (x(0) + h) * (x(1) - h), 0};
     for (int axis = 0; axis < 4; ++axis) {
-        check(close(legacy_value(axis), expected_gradient[axis]), "opaque compile-time strategy mismatch");
-        check(close(wrapped(axis), expected_gradient[axis]), "Field wrapper must forward the compile-time strategy");
         check(close(typed(axis), expected_gradient[axis]), "direct typed partial must evaluate its sampling tree");
         check(close(shifted_typed(axis), shifted_gradient[axis]), "direct typed partial must forward h to offsets");
         check(close(raised(axis), expected_gradient[axis]), "partial_up must forward the compile-time strategy");
+        check(close(raised_value(axis), expected_gradient[axis]), "partial_up expression must raise its derivative index");
     }
 
     // A derivative inside an ordinary operation must also expand at every outer sample.
